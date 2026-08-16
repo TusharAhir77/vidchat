@@ -1,20 +1,71 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import os
+import time
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'videochat_secret_key_2026'
 
-# Initialize SocketIO with support for async WebSocket framing
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent' if 'gevent' in globals() else 'threading')
 
-# In-memory storage for active room participants
-# Format: { socket_id: { 'username': str, 'room': str, 'avatarColor': str, 'audio': bool, 'video': bool, 'handRaised': bool } }
 users = {}
+rooms = {}
+
+def cleanup_stale_peers(room_name):
+    if room_name not in rooms:
+        return
+    now = time.time()
+    stale_ids = [pid for pid, info in rooms[room_name].items() if now - info['last_seen'] > 20]
+    for pid in stale_ids:
+        del rooms[room_name][pid]
 
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/api/room', methods=['GET', 'POST'])
+def room_api():
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        action = data.get('action')
+        room = data.get('room', 'commonlounge').strip().lower()
+        peer_id = data.get('peerId')
+
+        if action == 'leave' and room in rooms and peer_id in rooms[room]:
+            del rooms[room][peer_id]
+            return jsonify({'status': 'left'})
+
+    room = request.args.get('room', 'commonlounge').strip().lower()
+    peer_id = request.args.get('peerId')
+    username = request.args.get('username', 'Guest').strip()
+    avatar_color = request.args.get('avatarColor', '#3b82f6')
+
+    if room not in rooms:
+        rooms[room] = {}
+
+    cleanup_stale_peers(room)
+
+    if peer_id:
+        rooms[room][peer_id] = {
+            'username': username,
+            'avatarColor': avatar_color,
+            'last_seen': time.time()
+        }
+
+    active_peers = [
+        {
+            'peerId': pid,
+            'username': info['username'],
+            'avatarColor': info['avatarColor']
+        }
+        for pid, info in rooms[room].items()
+        if pid != peer_id
+    ]
+
+    return jsonify({
+        'room': room,
+        'peers': active_peers
+    })
 
 @socketio.on('connect')
 def handle_connect():
@@ -22,14 +73,10 @@ def handle_connect():
 
 @socketio.on('join-room')
 def handle_join_room(data):
-    room = data.get('room', 'lounge').strip().lower()
-    if not room:
-        room = 'lounge'
-        
+    room = data.get('room', 'lounge').strip().lower() or 'lounge'
     username = data.get('username', 'Anonymous').strip() or 'Anonymous'
     avatar_color = data.get('avatarColor', '#3b82f6')
     
-    # Register user state
     users[request.sid] = {
         'username': username,
         'room': room,
@@ -40,9 +87,7 @@ def handle_join_room(data):
     }
     
     join_room(room)
-    print(f"User '{username}' ({request.sid}) joined room '{room}'")
     
-    # Collect existing users in this room (excluding current user)
     existing_peers = [
         {
             'sid': sid,
@@ -56,14 +101,12 @@ def handle_join_room(data):
         if user_info['room'] == room and sid != request.sid
     ]
     
-    # Send existing peers list to the newly connected user
     emit('existing-users', {
         'peers': existing_peers,
         'selfSid': request.sid,
         'room': room
     })
     
-    # Notify other members in the room that a new user joined
     emit('user-joined', {
         'sid': request.sid,
         'username': username,
@@ -104,7 +147,6 @@ def handle_user_action(data):
     elif action_type == 'hand':
         user_info['handRaised'] = bool(action_value)
         
-    # Broadcast action update to all peers in the room
     emit('peer-action', {
         'sid': request.sid,
         'type': action_type,
@@ -137,9 +179,6 @@ def handle_disconnect():
         room = user_info['room']
         username = user_info['username']
         leave_room(room)
-        print(f"User '{username}' ({request.sid}) disconnected from room '{room}'")
-        
-        # Notify room members that user left
         emit('user-left', {
             'sid': request.sid,
             'username': username
@@ -148,4 +187,3 @@ def handle_disconnect():
 if __name__ == '__main__':
     print("Starting Group Video Call Server on http://127.0.0.1:5000")
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
-

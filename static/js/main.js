@@ -1,7 +1,7 @@
-// OmniCall - Group Video Call JavaScript Application Logic (Vercel & Local Serverless Ready)
+// OmniCall - Multi-User Group Video Calling Engine (Vercel Serverless & Local WebRTC)
 
 document.addEventListener('DOMContentLoaded', () => {
-    // DOM Elements - Login
+    // DOM Elements - Login Screen
     const loginScreen = document.getElementById('login-screen');
     const callScreen = document.getElementById('call-screen');
     const joinForm = document.getElementById('join-form');
@@ -13,7 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const previewToggleVideo = document.getElementById('preview-toggle-video');
     const colorDots = document.querySelectorAll('.color-dot');
 
-    // DOM Elements - Call
+    // DOM Elements - Call Screen Header
     const displayRoomName = document.getElementById('display-room-name');
     const participantCountBadge = document.getElementById('participant-count-badge');
     const sidebarPeerCount = document.getElementById('sidebar-peer-count');
@@ -30,7 +30,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnPeopleToggle = document.getElementById('btn-people-toggle');
     const btnLeave = document.getElementById('btn-leave');
 
-    // Sidebar
+    // Sidebar & Chat Elements
     const callSidebar = document.getElementById('call-sidebar');
     const btnCloseSidebar = document.getElementById('btn-close-sidebar');
     const tabChat = document.getElementById('tab-chat');
@@ -44,7 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const participantsList = document.getElementById('participants-list');
     const toastContainer = document.getElementById('toast-container');
 
-    // WebRTC Configuration
+    // WebRTC STUN Configuration
     const rtcConfig = {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
@@ -53,23 +53,23 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // State Variables
-    let socket = null;
     let peerJsInstance = null;
     let localStream = null;
     let screenStream = null;
     let selfSid = null;
     let username = '';
-    let roomName = '';
+    let roomName = 'common lounge';
     let avatarColor = '#3b82f6';
     let isAudioEnabled = true;
     let isVideoEnabled = true;
     let isScreenSharing = false;
     let isHandRaised = false;
+    let isLocalCardCreated = false;
     let unreadChatCount = 0;
     let callStartTime = null;
-    let timerInterval = null;
+    let heartbeatTimer = null;
 
-    // Peer Storage: { [sid]: { pc, call, dataConn, username, avatarColor, videoCard, audio, video, handRaised } }
+    // Active Remote Peers Storage: { [peerId]: { call, dataConn, username, avatarColor, audio, video, handRaised } }
     const peers = {};
 
     // Check URL parameters for direct room joining (?room=xyz)
@@ -88,7 +88,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // Initialize Local Preview Video on Login Screen
+    // Initialize Camera / Microphone Media Preview
     async function initPreviewMedia() {
         try {
             localStream = await navigator.mediaDevices.getUserMedia({
@@ -98,10 +98,10 @@ document.addEventListener('DOMContentLoaded', () => {
             loginVideoPreview.srcObject = localStream;
             previewPlaceholder.style.display = 'none';
         } catch (err) {
-            console.warn('Could not acquire audio/video stream for preview:', err);
+            console.warn('Could not acquire camera/microphone:', err);
             previewPlaceholder.style.display = 'flex';
             previewPlaceholder.innerHTML = '<i class="fa-solid fa-video-slash"></i>';
-            showToast('Camera/Mic permission needed for video calling.', 'warning');
+            showToast('Camera/Mic permission needed for video call.', 'warning');
         }
     }
     initPreviewMedia();
@@ -130,7 +130,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // JOIN FORM SUBMISSION
+    // JOIN FORM SUBMIT
     joinForm.addEventListener('submit', (e) => {
         e.preventDefault();
         username = usernameInput.value.trim();
@@ -138,7 +138,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (!username) return;
 
-        // Switch to Call Screen UI
+        // Switch to Main Call UI
         loginScreen.classList.remove('active');
         loginScreen.classList.add('hidden');
         callScreen.classList.remove('hidden');
@@ -146,119 +146,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
         displayRoomName.textContent = roomName === 'common lounge' ? 'Common Lounge' : roomName;
         
-        // Update control button states
         updateControlButtonState(btnAudio, isAudioEnabled, 'fa-microphone', 'fa-microphone-slash');
         updateControlButtonState(btnVideo, isVideoEnabled, 'fa-video', 'fa-video-slash');
 
-        // Connect to Socket.IO or PeerJS
-        initializeSignaling();
+        // Initialize PeerJS Multi-User Group Calling Engine
+        initPeerEngine();
         startCallTimer();
     });
 
-    // INITIALIZE SIGNALING (Dual-Mode: Socket.IO + PeerJS Fallback for Vercel)
-    function initializeSignaling() {
-        if (typeof io !== 'undefined') {
-            socket = io();
-
-            socket.on('connect', () => {
-                console.log('Connected to Socket.IO signaling server:', socket.id);
-                selfSid = socket.id;
-
-                socket.emit('join-room', {
-                    room: roomName,
-                    username: username,
-                    avatarColor: avatarColor
-                });
-
-                createLocalVideoCard();
-            });
-
-            socket.on('connect_error', () => {
-                console.warn('Socket.IO connection failed, switching to PeerJS serverless mode...');
-                initPeerJsSignaling();
-            });
-
-            socket.on('existing-users', (data) => {
-                const existingPeers = data.peers;
-                existingPeers.forEach(peer => {
-                    createPeerConnection(peer.sid, peer.username, peer.avatarColor, true);
-                });
-                updateParticipantCount();
-            });
-
-            socket.on('user-joined', (data) => {
-                showToast(`${data.username} joined the call`, 'info');
-                createPeerConnection(data.sid, data.username, data.avatarColor, false);
-                updateParticipantCount();
-            });
-
-            socket.on('signal', async (data) => {
-                const senderSid = data.sender;
-                const signal = data.signal;
-                
-                if (!peers[senderSid]) {
-                    createPeerConnection(senderSid, data.username, data.avatarColor, false);
-                }
-
-                const pc = peers[senderSid].pc;
-                try {
-                    if (signal.sdp) {
-                        await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-                        if (signal.sdp.type === 'offer') {
-                            const answer = await pc.createAnswer();
-                            await pc.setLocalDescription(answer);
-                            socket.emit('signal', {
-                                target: senderSid,
-                                signal: { sdp: pc.localDescription }
-                            });
-                        }
-                    } else if (signal.candidate) {
-                        await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
-                    }
-                } catch (err) {
-                    console.error('Error handling WebRTC signal:', err);
-                }
-            });
-
-            socket.on('peer-action', (data) => {
-                const peer = peers[data.sid];
-                if (!peer) return;
-
-                if (data.type === 'audio') {
-                    peer.audio = data.value;
-                    updatePeerAudioUI(data.sid, data.value);
-                } else if (data.type === 'video') {
-                    peer.video = data.value;
-                    updatePeerVideoUI(data.sid, data.value);
-                } else if (data.type === 'hand') {
-                    peer.handRaised = data.value;
-                    updatePeerHandUI(data.sid, data.value);
-                }
-                updateParticipantsList();
-            });
-
-            socket.on('chat-message', (data) => {
-                appendChatMessage(data);
-                if (data.senderSid !== selfSid && (callSidebar.classList.contains('hidden') || panelChat.classList.contains('hidden'))) {
-                    unreadChatCount++;
-                    unreadChatBadge.textContent = unreadChatCount;
-                    unreadChatBadge.classList.remove('hidden');
-                }
-            });
-
-            socket.on('user-left', (data) => {
-                showToast(`${data.username} left the call`, 'info');
-                removePeer(data.sid);
-            });
-        } else {
-            initPeerJsSignaling();
-        }
-    }
-
-    // PEERJS SIGNALING (For Vercel Serverless Deployment)
-    function initPeerJsSignaling() {
-        if (typeof Peer === 'undefined') return;
-
+    // PEERJS MULTI-USER CALLING ENGINE
+    function initPeerEngine() {
         const cleanRoom = roomName.replace(/[^a-zA-Z0-9]/g, '');
         const randomId = Math.random().toString(36).substring(2, 7);
         const myPeerId = `omnicall_${cleanRoom}_${randomId}`;
@@ -266,114 +163,155 @@ document.addEventListener('DOMContentLoaded', () => {
         peerJsInstance = new Peer(myPeerId, { config: rtcConfig });
 
         peerJsInstance.on('open', (id) => {
-            console.log('PeerJS serverless signaling connected:', id);
+            console.log('PeerJS connected with ID:', id);
             selfSid = id;
+            
+            // Create Local Video Card exactly once
             createLocalVideoCard();
+
+            // Register with Room API & start Heartbeat Polling
+            pollRoomPeers();
+            heartbeatTimer = setInterval(pollRoomPeers, 4000);
         });
 
-        // Incoming Call
+        // Handle Incoming Call from another user
         peerJsInstance.on('call', (call) => {
-            const peerUsername = call.metadata ? call.metadata.username : 'Participant';
-            const peerAvatarColor = call.metadata ? call.metadata.avatarColor : '#8b5cf6';
-            
+            const peerUsername = (call.metadata && call.metadata.username) ? call.metadata.username : 'Participant';
+            const peerAvatarColor = (call.metadata && call.metadata.avatarColor) ? call.metadata.avatarColor : '#8b5cf6';
+
+            console.log(`Incoming call from: ${peerUsername} (${call.peer})`);
             call.answer(localStream);
-            
-            peers[call.peer] = {
-                pc: call.peerConnection,
-                call: call,
-                username: peerUsername,
-                avatarColor: peerAvatarColor,
-                videoCard: null,
-                audio: true,
-                video: true,
-                handRaised: false
-            };
 
             call.on('stream', (remoteStream) => {
-                createRemoteVideoCard(call.peer, remoteStream);
-                updateParticipantCount();
-                updateParticipantsList();
+                addOrUpdatePeer(call.peer, peerUsername, peerAvatarColor, call, null, remoteStream);
             });
 
             call.on('close', () => removePeer(call.peer));
+            call.on('error', () => removePeer(call.peer));
         });
 
-        // Incoming Data Connection for Chat & Actions
-        peerJsInstance.on('connection', (conn) => {
-            conn.on('data', (data) => handleIncomingData(data, conn.peer));
+        // Handle Incoming Data Connection for Chat & Actions
+        peerJsInstance.on('connection', (dataConn) => {
+            dataConn.on('data', (data) => handleIncomingPeerData(data, dataConn.peer));
+        });
+
+        peerJsInstance.on('error', (err) => {
+            console.warn('PeerJS engine error:', err);
         });
     }
 
-    function handleIncomingData(data, senderPeerId) {
-        if (data.type === 'chat') {
-            appendChatMessage(data);
-        } else if (data.type === 'action') {
-            const peer = peers[senderPeerId];
-            if (peer) {
-                if (data.action === 'audio') updatePeerAudioUI(senderPeerId, data.value);
-                if (data.action === 'video') updatePeerVideoUI(senderPeerId, data.value);
-                if (data.action === 'hand') updatePeerHandUI(senderPeerId, data.value);
-            }
+    // POLL ROOM API FOR OTHER ACTIVE PARTICIPANTS
+    async function pollRoomPeers() {
+        if (!selfSid) return;
+        try {
+            const res = await fetch(`/api/room?room=${encodeURIComponent(roomName)}&peerId=${encodeURIComponent(selfSid)}&username=${encodeURIComponent(username)}&avatarColor=${encodeURIComponent(avatarColor)}`);
+            if (!res.ok) return;
+
+            const data = await res.json();
+            const activePeers = data.peers || [];
+
+            activePeers.forEach(peerInfo => {
+                const targetPeerId = peerInfo.peerId;
+                if (!peers[targetPeerId]) {
+                    console.log(`Discovered new room peer: ${peerInfo.username} (${targetPeerId}), connecting...`);
+                    
+                    // Call remote peer with local stream
+                    const call = peerJsInstance.call(targetPeerId, localStream, {
+                        metadata: { username: username, avatarColor: avatarColor }
+                    });
+
+                    // Establish Data Connection for chat/hand signals
+                    const dataConn = peerJsInstance.connect(targetPeerId);
+
+                    if (call) {
+                        call.on('stream', (remoteStream) => {
+                            addOrUpdatePeer(targetPeerId, peerInfo.username, peerInfo.avatarColor, call, dataConn, remoteStream);
+                        });
+                        call.on('close', () => removePeer(targetPeerId));
+                        call.on('error', () => removePeer(targetPeerId));
+                    }
+
+                    if (dataConn) {
+                        dataConn.on('data', (data) => handleIncomingPeerData(data, targetPeerId));
+                    }
+                }
+            });
+
+            // Clean up any peers who stopped heartbeating
+            const activePeerIdSet = new Set(activePeers.map(p => p.peerId));
+            Object.keys(peers).forEach(pid => {
+                if (!activePeerIdSet.has(pid)) {
+                    removePeer(pid);
+                }
+            });
+
+        } catch (err) {
+            console.warn('Room peer polling error:', err);
         }
     }
 
-    // WEBRTC PEER CONNECTION CREATOR (Local Socket.IO mode)
-    function createPeerConnection(peerSid, peerUsername, peerAvatarColor, isInitiator) {
-        if (peers[peerSid]) return;
+    // ADD OR UPDATE PEER RECORD & VIDEO CARD
+    function addOrUpdatePeer(peerId, peerUsername, peerAvatarColor, call, dataConn, stream) {
+        if (!peers[peerId]) {
+            showToast(`${peerUsername} joined the call`, 'info');
+        }
 
-        const pc = new RTCPeerConnection(rtcConfig);
-
-        peers[peerSid] = {
-            pc: pc,
+        peers[peerId] = {
+            call: call,
+            dataConn: dataConn || (peers[peerId] ? peers[peerId].dataConn : null),
             username: peerUsername,
             avatarColor: peerAvatarColor,
-            videoCard: null,
             audio: true,
             video: true,
             handRaised: false
         };
 
-        if (localStream) {
-            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-        }
-
-        pc.onicecandidate = (event) => {
-            if (event.candidate && socket) {
-                socket.emit('signal', {
-                    target: peerSid,
-                    signal: { candidate: event.candidate }
-                });
-            }
-        };
-
-        pc.ontrack = (event) => {
-            createRemoteVideoCard(peerSid, event.streams[0]);
-        };
-
-        if (isInitiator) {
-            pc.onnegotiationneeded = async () => {
-                try {
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    if (socket) {
-                        socket.emit('signal', {
-                            target: peerSid,
-                            signal: { sdp: pc.localDescription }
-                        });
-                    }
-                } catch (err) {
-                    console.error('Error creating SDP offer:', err);
-                }
-            };
-        }
-
+        createRemoteVideoCard(peerId, stream, peerUsername, peerAvatarColor);
+        updateParticipantCount();
         updateParticipantsList();
     }
 
-    // LOCAL USER VIDEO CARD
+    // HANDLE INCOMING CHAT / ACTION SIGNAL FROM PEER
+    function handleIncomingPeerData(data, senderPeerId) {
+        if (data.type === 'chat') {
+            appendChatMessage(data);
+            if (callSidebar.classList.contains('hidden') || panelChat.classList.contains('hidden')) {
+                unreadChatCount++;
+                unreadChatBadge.textContent = unreadChatCount;
+                unreadChatBadge.classList.remove('hidden');
+            }
+        } else if (data.type === 'action') {
+            const peer = peers[senderPeerId];
+            if (peer) {
+                if (data.action === 'audio') {
+                    peer.audio = data.value;
+                    updatePeerAudioUI(senderPeerId, data.value);
+                } else if (data.action === 'video') {
+                    peer.video = data.value;
+                    updatePeerVideoUI(senderPeerId, data.value);
+                } else if (data.action === 'hand') {
+                    peer.handRaised = data.value;
+                    updatePeerHandUI(senderPeerId, data.value);
+                }
+                updateParticipantsList();
+            }
+        }
+    }
+
+    // BROADCAST SIGNAL TO ALL PEERS DATA CHANNELS
+    function broadcastData(data) {
+        Object.keys(peers).forEach(pid => {
+            const peer = peers[pid];
+            if (peer.dataConn && peer.dataConn.open) {
+                peer.dataConn.send(data);
+            }
+        });
+    }
+
+    // CREATE LOCAL USER VIDEO CARD (GUARDED AGAINST DUPLICATES)
     function createLocalVideoCard() {
-        const existingCard = document.getElementById(`video-card-${selfSid}`);
-        if (existingCard) return;
+        if (isLocalCardCreated) return;
+        isLocalCardCreated = true;
 
         const card = document.createElement('div');
         card.id = `video-card-${selfSid}`;
@@ -410,15 +348,12 @@ document.addEventListener('DOMContentLoaded', () => {
         updateParticipantsList();
     }
 
-    // REMOTE PEER VIDEO CARD
-    function createRemoteVideoCard(peerSid, stream) {
-        const peer = peers[peerSid];
-        if (!peer) return;
-
-        let card = document.getElementById(`video-card-${peerSid}`);
+    // CREATE REMOTE PEER VIDEO CARD
+    function createRemoteVideoCard(peerId, stream, peerUsername, peerAvatarColor) {
+        let card = document.getElementById(`video-card-${peerId}`);
         if (!card) {
             card = document.createElement('div');
-            card.id = `video-card-${peerSid}`;
+            card.id = `video-card-${peerId}`;
             card.className = 'video-card';
 
             const video = document.createElement('video');
@@ -428,18 +363,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const avatarOverlay = document.createElement('div');
             avatarOverlay.className = 'video-avatar-overlay';
-            avatarOverlay.style.display = peer.video ? 'none' : 'flex';
+            avatarOverlay.style.display = 'none';
             avatarOverlay.innerHTML = `
-                <div class="video-avatar-circle" style="background: ${peer.avatarColor}">
-                    ${peer.username.charAt(0).toUpperCase()}
+                <div class="video-avatar-circle" style="background: ${peerAvatarColor}">
+                    ${peerUsername.charAt(0).toUpperCase()}
                 </div>
             `;
 
             const userInfo = document.createElement('div');
             userInfo.className = 'card-user-info';
             userInfo.innerHTML = `
-                <i class="fa-solid ${peer.audio ? 'fa-microphone' : 'fa-microphone-slash muted'} audio-status-icon"></i>
-                <span>${peer.username}</span>
+                <i class="fa-solid fa-microphone audio-status-icon"></i>
+                <span>${peerUsername}</span>
             `;
 
             card.appendChild(video);
@@ -447,34 +382,40 @@ document.addEventListener('DOMContentLoaded', () => {
             card.appendChild(userInfo);
             videoGrid.appendChild(card);
 
-            peer.videoCard = card;
             updateGridColumns();
         } else {
             const video = card.querySelector('video');
-            if (video) video.srcObject = stream;
+            if (video && video.srcObject !== stream) {
+                video.srcObject = stream;
+            }
         }
     }
 
     // REMOVE PEER
-    function removePeer(peerSid) {
-        if (peers[peerSid]) {
-            if (peers[peerSid].pc) peers[peerSid].pc.close();
-            const card = document.getElementById(`video-card-${peerSid}`);
+    function removePeer(peerId) {
+        if (peers[peerId]) {
+            const peerUsername = peers[peerId].username;
+            if (peers[peerId].call) peers[peerId].call.close();
+            if (peers[peerId].dataConn) peers[peerId].dataConn.close();
+
+            const card = document.getElementById(`video-card-${peerId}`);
             if (card) card.remove();
-            delete peers[peerSid];
+
+            delete peers[peerId];
+            showToast(`${peerUsername} left the call`, 'info');
             updateGridColumns();
             updateParticipantCount();
             updateParticipantsList();
         }
     }
 
-    // GRID COLUMNS
+    // DYNAMIC GRID COLUMNS
     function updateGridColumns() {
         const totalCards = videoGrid.children.length;
         videoGrid.setAttribute('data-peer-count', totalCards);
     }
 
-    // PARTICIPANT LIST
+    // PARTICIPANT COUNT & LIST
     function updateParticipantCount() {
         const total = Object.keys(peers).length + 1;
         participantCountBadge.innerHTML = `<i class="fa-solid fa-user"></i> ${total}`;
@@ -503,8 +444,8 @@ document.addEventListener('DOMContentLoaded', () => {
         participantsList.appendChild(selfItem);
 
         // Peers
-        Object.keys(peers).forEach(sid => {
-            const peer = peers[sid];
+        Object.keys(peers).forEach(pid => {
+            const peer = peers[pid];
             const item = document.createElement('div');
             item.className = 'participant-item';
             item.innerHTML = `
@@ -525,22 +466,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // PEER UI UPDATERS
-    function updatePeerAudioUI(peerSid, enabled) {
-        const card = document.getElementById(`video-card-${peerSid}`);
+    function updatePeerAudioUI(peerId, enabled) {
+        const card = document.getElementById(`video-card-${peerId}`);
         if (!card) return;
         const icon = card.querySelector('.audio-status-icon');
         if (icon) icon.className = `fa-solid ${enabled ? 'fa-microphone' : 'fa-microphone-slash muted'} audio-status-icon`;
     }
 
-    function updatePeerVideoUI(peerSid, enabled) {
-        const card = document.getElementById(`video-card-${peerSid}`);
+    function updatePeerVideoUI(peerId, enabled) {
+        const card = document.getElementById(`video-card-${peerId}`);
         if (!card) return;
         const avatarOverlay = card.querySelector('.video-avatar-overlay');
         if (avatarOverlay) avatarOverlay.style.display = enabled ? 'none' : 'flex';
     }
 
-    function updatePeerHandUI(peerSid, raised) {
-        const card = document.getElementById(`video-card-${peerSid}`);
+    function updatePeerHandUI(peerId, raised) {
+        const card = document.getElementById(`video-card-${peerId}`);
         if (!card) return;
         let handBadge = card.querySelector('.hand-raised-badge');
         if (raised) {
@@ -555,7 +496,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // CONTROL BAR LISTENERS
+    // CALL TOOLBAR CONTROLS
     btnAudio.addEventListener('click', () => {
         if (!localStream) return;
         const audioTrack = localStream.getAudioTracks()[0];
@@ -570,7 +511,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (icon) icon.className = `fa-solid ${isAudioEnabled ? 'fa-microphone' : 'fa-microphone-slash muted'} audio-status-icon`;
             }
 
-            if (socket) socket.emit('user-action', { type: 'audio', value: isAudioEnabled });
+            broadcastData({ type: 'action', action: 'audio', value: isAudioEnabled });
             updateParticipantsList();
         }
     });
@@ -589,21 +530,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (overlay) overlay.style.display = isVideoEnabled ? 'none' : 'flex';
             }
 
-            if (socket) socket.emit('user-action', { type: 'video', value: isVideoEnabled });
+            broadcastData({ type: 'action', action: 'video', value: isVideoEnabled });
             updateParticipantsList();
         }
     });
 
-    // SCREEN SHARE
+    // SCREEN SHARING
     btnScreen.addEventListener('click', async () => {
         if (!isScreenSharing) {
             try {
                 screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
                 const screenTrack = screenStream.getVideoTracks()[0];
 
-                Object.keys(peers).forEach(sid => {
-                    if (peers[sid].pc) {
-                        const senders = peers[sid].pc.getSenders();
+                // Replace video track for all remote peer calls
+                Object.keys(peers).forEach(pid => {
+                    const peer = peers[pid];
+                    if (peer.call && peer.call.peerConnection) {
+                        const senders = peer.call.peerConnection.getSenders();
                         const sender = senders.find(s => s.track && s.track.kind === 'video');
                         if (sender) sender.replaceTrack(screenTrack);
                     }
@@ -631,11 +574,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const videoTrack = localStream.getVideoTracks()[0];
-        Object.keys(peers).forEach(sid => {
-            if (peers[sid].pc) {
-                const senders = peers[sid].pc.getSenders();
+        Object.keys(peers).forEach(pid => {
+            const peer = peers[pid];
+            if (peer.call && peer.call.peerConnection && videoTrack) {
+                const senders = peer.call.peerConnection.getSenders();
                 const sender = senders.find(s => s.track && s.track.kind === 'video');
-                if (sender && videoTrack) sender.replaceTrack(videoTrack);
+                if (sender) sender.replaceTrack(videoTrack);
             }
         });
 
@@ -666,7 +610,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        if (socket) socket.emit('user-action', { type: 'hand', value: isHandRaised });
+        broadcastData({ type: 'action', action: 'hand', value: isHandRaised });
         updateParticipantsList();
     });
 
@@ -701,13 +645,14 @@ document.addEventListener('DOMContentLoaded', () => {
         panel.classList.add('active');
     }
 
-    // CHAT SUBMISSION
+    // CHAT FORM SUBMIT
     chatForm.addEventListener('submit', (e) => {
         e.preventDefault();
         const msg = chatInput.value.trim();
         if (!msg) return;
 
         const chatPayload = {
+            type: 'chat',
             senderSid: selfSid,
             username: username,
             avatarColor: avatarColor,
@@ -715,11 +660,8 @@ document.addEventListener('DOMContentLoaded', () => {
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         };
 
-        if (socket) {
-            socket.emit('chat-message', chatPayload);
-        } else {
-            appendChatMessage(chatPayload);
-        }
+        appendChatMessage(chatPayload);
+        broadcastData(chatPayload);
 
         chatInput.value = '';
     });
@@ -741,12 +683,27 @@ document.addEventListener('DOMContentLoaded', () => {
         chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
-    // LEAVE CALL
+    // LEAVE CALL & UNLOAD
     btnLeave.addEventListener('click', () => {
         if (confirm('Are you sure you want to leave the call?')) {
+            leaveCall();
             window.location.reload();
         }
     });
+
+    window.addEventListener('beforeunload', leaveCall);
+
+    function leaveCall() {
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        if (selfSid) {
+            fetch('/api/room', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'leave', room: roomName, peerId: selfSid }),
+                keepalive: true
+            }).catch(() => {});
+        }
+    }
 
     // COPY INVITATION LINK
     btnCopyLink.addEventListener('click', () => {
@@ -759,7 +716,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // CALL TIMER
     function startCallTimer() {
         callStartTime = Date.now();
-        timerInterval = setInterval(() => {
+        setInterval(() => {
             const elapsedSeconds = Math.floor((Date.now() - callStartTime) / 1000);
             const mins = String(Math.floor(elapsedSeconds / 60)).padStart(2, '0');
             const secs = String(elapsedSeconds % 60).padStart(2, '0');
@@ -767,7 +724,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 1000);
     }
 
-    // HELPERS
+    // UTILITY FUNCTIONS
     function updateControlButtonState(btn, enabled, activeIcon, inactiveIcon) {
         btn.classList.toggle('off', !enabled);
         const icon = btn.querySelector('i');
