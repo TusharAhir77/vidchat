@@ -8,14 +8,12 @@ static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'stat
 app = Flask(__name__, template_folder=template_dir, static_folder=static_dir)
 app.config['SECRET_KEY'] = 'videochat_secret_key_2026'
 
-# In-memory peer registry for Vercel Serverless Function instances
 rooms = {}
 
 def cleanup_stale_peers(room_name):
     if room_name not in rooms:
         return
     now = time.time()
-    # Remove peers inactive for more than 25 seconds
     stale_ids = [pid for pid, info in rooms[room_name].items() if now - info['last_seen'] > 25]
     for pid in stale_ids:
         del rooms[room_name][pid]
@@ -63,7 +61,6 @@ def room_api():
             'last_seen': time.time()
         }
 
-    # Return active peers in the room except the requesting peer
     active_peers = [
         {
             'peerId': pid,

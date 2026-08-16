@@ -1,4 +1,4 @@
-// OmniCall - Multi-User Cross-Device Group Video Calling Engine
+// OmniCall - Multi-User Cross-Device Group Video Calling Engine (Slot-Mesh + Serverless WebRTC)
 
 document.addEventListener('DOMContentLoaded', () => {
     // DOM Elements - Login Screen
@@ -88,6 +88,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let unreadChatCount = 0;
     let callStartTime = null;
     let heartbeatTimer = null;
+    let currentSlotIndex = 0;
 
     // Active Remote Peers Storage: { [peerId]: { call, dataConn, username, avatarColor, audio, video, handRaised } }
     const peers = {};
@@ -169,33 +170,67 @@ document.addEventListener('DOMContentLoaded', () => {
         updateControlButtonState(btnAudio, isAudioEnabled, 'fa-microphone', 'fa-microphone-slash');
         updateControlButtonState(btnVideo, isVideoEnabled, 'fa-video', 'fa-video-slash');
 
-        initPeerEngine();
+        // Claim slot in room & start cross-device engine
+        claimRoomSlot(0);
         startCallTimer();
     });
 
-    // PEERJS MULTI-USER CROSS-DEVICE CALLING ENGINE
-    function initPeerEngine() {
-        const cleanRoom = roomName.replace(/[^a-zA-Z0-9]/g, '');
-        const randomId = Math.random().toString(36).substring(2, 7);
-        const myPeerId = `omnicall_${cleanRoom}_${randomId}`;
+    // CLAIM DETERMINISTIC ROOM SLOT FOR CROSS-DEVICE CONNECTIVITY
+    function claimRoomSlot(slotIdx) {
+        if (slotIdx >= 10) {
+            // Fallback to random peer ID if all 10 slots occupied
+            const cleanRoom = roomName.replace(/[^a-zA-Z0-9]/g, '') || 'lounge';
+            const randomId = Math.random().toString(36).substring(2, 7);
+            initPeerEngine(`omnicall_${cleanRoom}_p_${randomId}`);
+            return;
+        }
 
-        peerJsInstance = new Peer(myPeerId, { config: rtcConfig, debug: 1 });
+        currentSlotIndex = slotIdx;
+        const cleanRoom = roomName.replace(/[^a-zA-Z0-9]/g, '') || 'lounge';
+        const targetSlotId = `omnicall_${cleanRoom}_s${slotIdx}`;
+
+        console.log(`Attempting to claim room slot ${slotIdx}: ${targetSlotId}`);
+        initPeerEngine(targetSlotId, slotIdx);
+    }
+
+    // INITIALIZE PEER ENGINE WITH SPECIFIC PEER ID
+    function initPeerEngine(peerId, slotIdx = 0) {
+        peerJsInstance = new Peer(peerId, { config: rtcConfig, debug: 1 });
 
         peerJsInstance.on('open', (id) => {
-            console.log('PeerJS engine ready on device with ID:', id);
+            console.log(`Successfully claimed slot & joined room with Peer ID: ${id}`);
             selfSid = id;
             
             createLocalVideoCard();
+
+            // Dial all other room slots (0 to 9) to ensure instant mesh connection across devices
+            connectToRoomSlots();
+            
+            // Poll /api/room API & heartbeat
             pollRoomPeers();
-            heartbeatTimer = setInterval(pollRoomPeers, 3000);
+            heartbeatTimer = setInterval(() => {
+                pollRoomPeers();
+                connectToRoomSlots();
+            }, 3500);
         });
 
-        // Handle Incoming Call from another device
+        // If slot ID is taken by another device, try next slot
+        peerJsInstance.on('error', (err) => {
+            if (err.type === 'unavailable-id') {
+                console.log(`Slot ${slotIdx} occupied by another device, trying slot ${slotIdx + 1}...`);
+                peerJsInstance.destroy();
+                claimRoomSlot(slotIdx + 1);
+            } else {
+                console.warn('PeerJS notice:', err);
+            }
+        });
+
+        // Handle Incoming Video Call from Remote Device
         peerJsInstance.on('call', (call) => {
             const peerUsername = (call.metadata && call.metadata.username) ? call.metadata.username : 'Participant';
             const peerAvatarColor = (call.metadata && call.metadata.avatarColor) ? call.metadata.avatarColor : '#8b5cf6';
 
-            console.log(`Incoming cross-device call from: ${peerUsername} (${call.peer})`);
+            console.log(`Incoming call from remote device: ${peerUsername} (${call.peer})`);
             call.answer(localStream);
 
             call.on('stream', (remoteStream) => {
@@ -203,23 +238,57 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
             call.on('close', () => removePeer(call.peer));
-            call.on('error', (err) => {
-                console.warn('Call error from peer:', call.peer, err);
-                removePeer(call.peer);
-            });
+            call.on('error', () => removePeer(call.peer));
         });
 
-        // Handle Incoming Data Connection for Chat & Action Signals
+        // Handle Incoming Data Connection for Chat & Actions
         peerJsInstance.on('connection', (dataConn) => {
             dataConn.on('data', (data) => handleIncomingPeerData(data, dataConn.peer));
         });
-
-        peerJsInstance.on('error', (err) => {
-            console.warn('PeerJS cross-device connection notice:', err);
-        });
     }
 
-    // POLL ROOM API FOR ACTIVE PARTICIPANTS ACROSS DEVICES
+    // DIAL ALL ROOM SLOTS TO ESTABLISH DIRECT WEBRTC P2P MESH
+    function connectToRoomSlots() {
+        if (!selfSid || !peerJsInstance) return;
+        const cleanRoom = roomName.replace(/[^a-zA-Z0-9]/g, '') || 'lounge';
+
+        for (let i = 0; i < 8; i++) {
+            const slotId = `omnicall_${cleanRoom}_s${i}`;
+            
+            // Do not call self and do not re-call already connected active peers
+            if (slotId !== selfSid && !peers[slotId]) {
+                dialPeer(slotId);
+            }
+        }
+    }
+
+    // DIAL TARGET PEER ID
+    function dialPeer(targetPeerId, customName = null, customColor = null) {
+        if (!peerJsInstance || peers[targetPeerId]) return;
+
+        console.log(`Dialing target peer: ${targetPeerId}`);
+        const call = peerJsInstance.call(targetPeerId, localStream, {
+            metadata: { username: username, avatarColor: avatarColor }
+        });
+
+        const dataConn = peerJsInstance.connect(targetPeerId);
+
+        if (call) {
+            call.on('stream', (remoteStream) => {
+                const peerName = customName || (call.metadata && call.metadata.username) || 'Participant';
+                const peerColor = customColor || (call.metadata && call.metadata.avatarColor) || '#8b5cf6';
+                addOrUpdatePeer(targetPeerId, peerName, peerColor, call, dataConn, remoteStream);
+            });
+            call.on('close', () => removePeer(targetPeerId));
+            call.on('error', () => removePeer(targetPeerId));
+        }
+
+        if (dataConn) {
+            dataConn.on('data', (data) => handleIncomingPeerData(data, targetPeerId));
+        }
+    }
+
+    // POLL SERVERLESS /API/ROOM AS SECONDARY DISCOVERY BACKUP
     async function pollRoomPeers() {
         if (!selfSid) return;
         try {
@@ -231,41 +300,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
             activePeers.forEach(peerInfo => {
                 const targetPeerId = peerInfo.peerId;
-                
-                // Deterministic call initiation: lower PeerID initiates call to avoid collisions
-                if (!peers[targetPeerId] && selfSid < targetPeerId) {
-                    console.log(`Dialing peer on target device: ${peerInfo.username} (${targetPeerId})`);
-                    
-                    const call = peerJsInstance.call(targetPeerId, localStream, {
-                        metadata: { username: username, avatarColor: avatarColor }
-                    });
-
-                    const dataConn = peerJsInstance.connect(targetPeerId);
-
-                    if (call) {
-                        call.on('stream', (remoteStream) => {
-                            addOrUpdatePeer(targetPeerId, peerInfo.username, peerInfo.avatarColor, call, dataConn, remoteStream);
-                        });
-                        call.on('close', () => removePeer(targetPeerId));
-                        call.on('error', () => removePeer(targetPeerId));
-                    }
-
-                    if (dataConn) {
-                        dataConn.on('data', (data) => handleIncomingPeerData(data, targetPeerId));
-                    }
+                if (!peers[targetPeerId] && targetPeerId !== selfSid) {
+                    dialPeer(targetPeerId, peerInfo.username, peerInfo.avatarColor);
                 }
             });
-
-            // Clean up any peers who left the room
-            const activePeerIdSet = new Set(activePeers.map(p => p.peerId));
-            Object.keys(peers).forEach(pid => {
-                if (!activePeerIdSet.has(pid)) {
-                    removePeer(pid);
-                }
-            });
-
         } catch (err) {
-            console.warn('Cross-device room polling error:', err);
+            // Silence background polling notice if running strictly client-side
         }
     }
 
@@ -369,7 +409,7 @@ document.addEventListener('DOMContentLoaded', () => {
         updateParticipantsList();
     }
 
-    // CREATE REMOTE PEER VIDEO CARD (OPTIMIZED FOR MOBILE & DESKTOP BROWSERS)
+    // CREATE REMOTE PEER VIDEO CARD
     function createRemoteVideoCard(peerId, stream, peerUsername, peerAvatarColor) {
         let card = document.getElementById(`video-card-${peerId}`);
         if (!card) {
