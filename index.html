@@ -4,122 +4,103 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OmniCall – Group Video Calling</title>
-    <meta name="description" content="OmniCall – Free open group video calling. Join the lounge, invite friends, no sign up needed.">
+    <meta name="description" content="Free open group video calling. Join any room, no sign-up needed.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link rel="stylesheet" href="static/css/style.css">
 </head>
 <body>
 
-<!-- ========================= LOGIN SCREEN ========================= -->
+<!-- ═══ LOGIN SCREEN ═══ -->
 <div id="login-screen" class="screen active">
-    <div class="login-bg-blobs">
-        <div class="blob blob-1"></div>
-        <div class="blob blob-2"></div>
-        <div class="blob blob-3"></div>
+    <div class="bg-blobs">
+        <div class="blob b1"></div>
+        <div class="blob b2"></div>
+        <div class="blob b3"></div>
     </div>
     <div class="login-card glass">
         <div class="brand">
             <div class="brand-icon"><i class="fa-solid fa-video"></i></div>
-            <div class="brand-text">
-                <h1>OmniCall</h1>
-                <p>Open group video calling — no sign-up needed</p>
+            <div>
+                <h1 class="brand-name">OmniCall</h1>
+                <p class="brand-sub">Group video — no sign-up, connects any device</p>
             </div>
         </div>
 
         <div class="preview-wrap">
             <video id="preview-video" autoplay muted playsinline></video>
             <div id="preview-avatar" class="preview-avatar hidden">
-                <i class="fa-solid fa-user"></i>
+                <i class="fa-solid fa-user-slash"></i>
             </div>
-            <div class="preview-controls">
-                <button id="btn-pre-mic" class="pre-btn" title="Toggle mic">
-                    <i class="fa-solid fa-microphone"></i>
-                </button>
-                <button id="btn-pre-cam" class="pre-btn" title="Toggle camera">
-                    <i class="fa-solid fa-video"></i>
-                </button>
-            </div>
-            <div id="preview-status" class="preview-status">
-                <span class="dot-pulse"></span> Camera preview
+            <div class="preview-btns">
+                <button id="btn-pre-mic" class="pre-btn" title="Toggle Mic"><i class="fa-solid fa-microphone"></i></button>
+                <button id="btn-pre-cam" class="pre-btn" title="Toggle Camera"><i class="fa-solid fa-video"></i></button>
             </div>
         </div>
 
-        <form id="join-form">
+        <form id="join-form" autocomplete="off">
             <div class="field">
-                <label for="inp-name">Your display name</label>
-                <div class="field-inner">
+                <label for="inp-name">Your name</label>
+                <div class="inp-wrap">
                     <i class="fa-solid fa-user"></i>
-                    <input id="inp-name" type="text" placeholder="e.g. Tushar" maxlength="30" autocomplete="off" required>
+                    <input id="inp-name" type="text" placeholder="Enter your name" maxlength="28" required>
                 </div>
             </div>
             <div class="field">
                 <label for="inp-room">Room name</label>
-                <div class="field-inner">
+                <div class="inp-wrap">
                     <i class="fa-solid fa-door-open"></i>
-                    <input id="inp-room" type="text" placeholder="common-lounge" value="common-lounge" autocomplete="off">
+                    <input id="inp-room" type="text" placeholder="common-lounge" value="common-lounge">
                 </div>
-                <span class="field-hint">Everyone with the same room name connects together</span>
+                <small>Everyone with the same room name connects together</small>
             </div>
             <div class="field">
                 <label>Avatar color</label>
-                <div class="color-row">
-                    <button type="button" class="color-swatch active" data-color="#3b82f6" style="background:#3b82f6"></button>
-                    <button type="button" class="color-swatch" data-color="#8b5cf6" style="background:#8b5cf6"></button>
-                    <button type="button" class="color-swatch" data-color="#ec4899" style="background:#ec4899"></button>
-                    <button type="button" class="color-swatch" data-color="#10b981" style="background:#10b981"></button>
-                    <button type="button" class="color-swatch" data-color="#f59e0b" style="background:#f59e0b"></button>
-                    <button type="button" class="color-swatch" data-color="#06b6d4" style="background:#06b6d4"></button>
-                    <button type="button" class="color-swatch" data-color="#ef4444" style="background:#ef4444"></button>
+                <div class="colors">
+                    <button type="button" class="cswatch active" data-c="#3b82f6" style="background:#3b82f6"></button>
+                    <button type="button" class="cswatch" data-c="#8b5cf6" style="background:#8b5cf6"></button>
+                    <button type="button" class="cswatch" data-c="#ec4899" style="background:#ec4899"></button>
+                    <button type="button" class="cswatch" data-c="#10b981" style="background:#10b981"></button>
+                    <button type="button" class="cswatch" data-c="#f59e0b" style="background:#f59e0b"></button>
+                    <button type="button" class="cswatch" data-c="#06b6d4" style="background:#06b6d4"></button>
+                    <button type="button" class="cswatch" data-c="#ef4444" style="background:#ef4444"></button>
                 </div>
             </div>
             <button id="btn-join" type="submit" class="btn-join">
-                <i class="fa-solid fa-arrow-right-to-bracket"></i>
-                Join Call
+                <i class="fa-solid fa-arrow-right-to-bracket"></i> Join Video Call
             </button>
         </form>
     </div>
 </div>
 
-<!-- ========================= CALL SCREEN ========================= -->
+<!-- ═══ CALL SCREEN ═══ -->
 <div id="call-screen" class="screen hidden">
-
-    <!-- Header -->
-    <header class="call-header">
-        <div class="header-left">
+    <header class="call-hdr">
+        <div class="hdr-l">
             <div class="room-pill">
-                <span class="live-indicator"></span>
+                <span class="live-dot"></span>
                 <i class="fa-solid fa-users"></i>
                 <span id="room-label">common-lounge</span>
             </div>
             <button id="btn-invite" class="ghost-btn">
-                <i class="fa-solid fa-link"></i>
-                <span>Invite</span>
+                <i class="fa-solid fa-link"></i> Invite
             </button>
         </div>
-        <div class="header-center">
-            <span id="call-timer" class="call-timer">00:00</span>
-        </div>
-        <div class="header-right">
-            <div id="peer-count-pill" class="peer-pill">
-                <i class="fa-solid fa-user"></i> 1
-            </div>
+        <span id="call-timer" class="timer">00:00</span>
+        <div class="hdr-r">
+            <span id="peer-pill" class="peer-pill"><i class="fa-solid fa-user"></i> 1</span>
         </div>
     </header>
 
-    <!-- Workspace -->
     <div class="workspace">
-        <!-- Video grid -->
-        <div id="grid-wrap" class="grid-wrap">
+        <div class="grid-wrap">
             <div id="video-grid" class="video-grid" data-count="1"></div>
         </div>
-
-        <!-- Sidebar -->
         <aside id="sidebar" class="sidebar hidden">
-            <div class="sidebar-head">
-                <div class="sidebar-tabs">
+            <div class="sb-head">
+                <div class="sb-tabs">
                     <button class="stab active" data-panel="chat-panel">
                         <i class="fa-solid fa-comments"></i> Chat
                         <span id="chat-badge" class="badge hidden">0</span>
@@ -128,7 +109,7 @@
                         <i class="fa-solid fa-user-group"></i> People
                     </button>
                 </div>
-                <button id="btn-close-sidebar" class="icon-only-btn"><i class="fa-solid fa-xmark"></i></button>
+                <button id="btn-close-sb" class="icon-btn"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div id="chat-panel" class="panel active">
                 <div id="chat-log" class="chat-log">
@@ -145,46 +126,24 @@
         </aside>
     </div>
 
-    <!-- Controls -->
     <footer class="controls">
-        <div class="controls-inner">
-            <button id="btn-mic" class="ctrl-btn" title="Mute/Unmute">
-                <i class="fa-solid fa-microphone"></i>
-                <span>Mic</span>
-            </button>
-            <button id="btn-cam" class="ctrl-btn" title="Camera">
-                <i class="fa-solid fa-video"></i>
-                <span>Camera</span>
-            </button>
-            <button id="btn-screen" class="ctrl-btn" title="Share screen">
-                <i class="fa-solid fa-desktop"></i>
-                <span>Share</span>
-            </button>
-            <button id="btn-hand" class="ctrl-btn" title="Raise hand">
-                <i class="fa-solid fa-hand"></i>
-                <span>Hand</span>
-            </button>
-            <button id="btn-chat" class="ctrl-btn" title="Chat">
-                <i class="fa-solid fa-message"></i>
-                <span>Chat</span>
-            </button>
-            <button id="btn-people" class="ctrl-btn" title="People">
-                <i class="fa-solid fa-user-group"></i>
-                <span>People</span>
-            </button>
-            <button id="btn-leave" class="ctrl-btn danger-btn" title="Leave">
-                <i class="fa-solid fa-phone-slash"></i>
-                <span>Leave</span>
-            </button>
+        <div class="ctrl-row">
+            <button id="btn-mic"    class="cbtn" title="Mic"><i class="fa-solid fa-microphone"></i><span>Mic</span></button>
+            <button id="btn-cam"    class="cbtn" title="Camera"><i class="fa-solid fa-video"></i><span>Camera</span></button>
+            <button id="btn-screen" class="cbtn" title="Share Screen"><i class="fa-solid fa-desktop"></i><span>Share</span></button>
+            <button id="btn-hand"   class="cbtn" title="Raise Hand"><i class="fa-solid fa-hand"></i><span>Hand</span></button>
+            <button id="btn-chat"   class="cbtn" title="Chat"><i class="fa-solid fa-message"></i><span>Chat</span></button>
+            <button id="btn-people" class="cbtn" title="People"><i class="fa-solid fa-user-group"></i><span>People</span></button>
+            <button id="btn-leave"  class="cbtn cbtn-danger" title="Leave"><i class="fa-solid fa-phone-slash"></i><span>Leave</span></button>
         </div>
     </footer>
 </div>
 
-<!-- Toast -->
-<div id="toasts" class="toast-stack"></div>
+<div id="toasts" class="toasts"></div>
 
-<!-- PeerJS & App -->
-<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<!-- MQTT WebSockets Library for Zero-Config Global Signaling -->
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<!-- Main WebRTC Application Logic -->
 <script src="static/js/main.js"></script>
 </body>
 </html>
