@@ -15,16 +15,26 @@ def cleanup_stale_peers(room_name):
     if room_name not in rooms:
         return
     now = time.time()
-    stale_ids = [pid for pid, info in rooms[room_name].items() if now - info['last_seen'] > 20]
+    stale_ids = [pid for pid, info in rooms[room_name].items() if now - info['last_seen'] > 25]
     for pid in stale_ids:
         del rooms[room_name][pid]
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    return response
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/api/room', methods=['GET', 'POST'])
+@app.route('/api/room', methods=['GET', 'POST', 'OPTIONS'])
 def room_api():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+
     if request.method == 'POST':
         data = request.get_json(silent=True) or {}
         action = data.get('action')

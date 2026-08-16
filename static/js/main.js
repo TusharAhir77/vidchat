@@ -1,4 +1,4 @@
-// OmniCall - Multi-User Group Video Calling Engine (Vercel Serverless & Local WebRTC)
+// OmniCall - Multi-User Cross-Device Group Video Calling Engine
 
 document.addEventListener('DOMContentLoaded', () => {
     // DOM Elements - Login Screen
@@ -13,7 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const previewToggleVideo = document.getElementById('preview-toggle-video');
     const colorDots = document.querySelectorAll('.color-dot');
 
-    // DOM Elements - Call Screen Header
+    // DOM Elements - Call Header
     const displayRoomName = document.getElementById('display-room-name');
     const participantCountBadge = document.getElementById('participant-count-badge');
     const sidebarPeerCount = document.getElementById('sidebar-peer-count');
@@ -44,11 +44,31 @@ document.addEventListener('DOMContentLoaded', () => {
     const participantsList = document.getElementById('participants-list');
     const toastContainer = document.getElementById('toast-container');
 
-    // WebRTC STUN Configuration
+    // WebRTC STUN + TURN Configuration (For cross-device NAT / mobile 4G/5G traversal)
     const rtcConfig = {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' },
+            { urls: 'stun:stun.cloudflare.com:3478' },
+            {
+                urls: 'turn:openrelay.metered.ca:80',
+                username: 'openrelayproject',
+                credential: 'openrelayproject'
+            },
+            {
+                urls: 'turn:openrelay.metered.ca:443',
+                username: 'openrelayproject',
+                credential: 'openrelayproject'
+            },
+            {
+                urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+                username: 'openrelayproject',
+                credential: 'openrelayproject'
+            }
         ]
     };
 
@@ -92,7 +112,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function initPreviewMedia() {
         try {
             localStream = await navigator.mediaDevices.getUserMedia({
-                video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
                 audio: true
             });
             loginVideoPreview.srcObject = localStream;
@@ -149,37 +169,33 @@ document.addEventListener('DOMContentLoaded', () => {
         updateControlButtonState(btnAudio, isAudioEnabled, 'fa-microphone', 'fa-microphone-slash');
         updateControlButtonState(btnVideo, isVideoEnabled, 'fa-video', 'fa-video-slash');
 
-        // Initialize PeerJS Multi-User Group Calling Engine
         initPeerEngine();
         startCallTimer();
     });
 
-    // PEERJS MULTI-USER CALLING ENGINE
+    // PEERJS MULTI-USER CROSS-DEVICE CALLING ENGINE
     function initPeerEngine() {
         const cleanRoom = roomName.replace(/[^a-zA-Z0-9]/g, '');
         const randomId = Math.random().toString(36).substring(2, 7);
         const myPeerId = `omnicall_${cleanRoom}_${randomId}`;
 
-        peerJsInstance = new Peer(myPeerId, { config: rtcConfig });
+        peerJsInstance = new Peer(myPeerId, { config: rtcConfig, debug: 1 });
 
         peerJsInstance.on('open', (id) => {
-            console.log('PeerJS connected with ID:', id);
+            console.log('PeerJS engine ready on device with ID:', id);
             selfSid = id;
             
-            // Create Local Video Card exactly once
             createLocalVideoCard();
-
-            // Register with Room API & start Heartbeat Polling
             pollRoomPeers();
-            heartbeatTimer = setInterval(pollRoomPeers, 4000);
+            heartbeatTimer = setInterval(pollRoomPeers, 3000);
         });
 
-        // Handle Incoming Call from another user
+        // Handle Incoming Call from another device
         peerJsInstance.on('call', (call) => {
             const peerUsername = (call.metadata && call.metadata.username) ? call.metadata.username : 'Participant';
             const peerAvatarColor = (call.metadata && call.metadata.avatarColor) ? call.metadata.avatarColor : '#8b5cf6';
 
-            console.log(`Incoming call from: ${peerUsername} (${call.peer})`);
+            console.log(`Incoming cross-device call from: ${peerUsername} (${call.peer})`);
             call.answer(localStream);
 
             call.on('stream', (remoteStream) => {
@@ -187,20 +203,23 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
             call.on('close', () => removePeer(call.peer));
-            call.on('error', () => removePeer(call.peer));
+            call.on('error', (err) => {
+                console.warn('Call error from peer:', call.peer, err);
+                removePeer(call.peer);
+            });
         });
 
-        // Handle Incoming Data Connection for Chat & Actions
+        // Handle Incoming Data Connection for Chat & Action Signals
         peerJsInstance.on('connection', (dataConn) => {
             dataConn.on('data', (data) => handleIncomingPeerData(data, dataConn.peer));
         });
 
         peerJsInstance.on('error', (err) => {
-            console.warn('PeerJS engine error:', err);
+            console.warn('PeerJS cross-device connection notice:', err);
         });
     }
 
-    // POLL ROOM API FOR OTHER ACTIVE PARTICIPANTS
+    // POLL ROOM API FOR ACTIVE PARTICIPANTS ACROSS DEVICES
     async function pollRoomPeers() {
         if (!selfSid) return;
         try {
@@ -212,15 +231,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
             activePeers.forEach(peerInfo => {
                 const targetPeerId = peerInfo.peerId;
-                if (!peers[targetPeerId]) {
-                    console.log(`Discovered new room peer: ${peerInfo.username} (${targetPeerId}), connecting...`);
+                
+                // Deterministic call initiation: lower PeerID initiates call to avoid collisions
+                if (!peers[targetPeerId] && selfSid < targetPeerId) {
+                    console.log(`Dialing peer on target device: ${peerInfo.username} (${targetPeerId})`);
                     
-                    // Call remote peer with local stream
                     const call = peerJsInstance.call(targetPeerId, localStream, {
                         metadata: { username: username, avatarColor: avatarColor }
                     });
 
-                    // Establish Data Connection for chat/hand signals
                     const dataConn = peerJsInstance.connect(targetPeerId);
 
                     if (call) {
@@ -237,7 +256,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             });
 
-            // Clean up any peers who stopped heartbeating
+            // Clean up any peers who left the room
             const activePeerIdSet = new Set(activePeers.map(p => p.peerId));
             Object.keys(peers).forEach(pid => {
                 if (!activePeerIdSet.has(pid)) {
@@ -246,14 +265,14 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
         } catch (err) {
-            console.warn('Room peer polling error:', err);
+            console.warn('Cross-device room polling error:', err);
         }
     }
 
     // ADD OR UPDATE PEER RECORD & VIDEO CARD
     function addOrUpdatePeer(peerId, peerUsername, peerAvatarColor, call, dataConn, stream) {
         if (!peers[peerId]) {
-            showToast(`${peerUsername} joined the call`, 'info');
+            showToast(`${peerUsername} connected`, 'info');
         }
 
         peers[peerId] = {
@@ -271,7 +290,7 @@ document.addEventListener('DOMContentLoaded', () => {
         updateParticipantsList();
     }
 
-    // HANDLE INCOMING CHAT / ACTION SIGNAL FROM PEER
+    // HANDLE INCOMING PEER DATA (CHAT & ACTION SIGNALS)
     function handleIncomingPeerData(data, senderPeerId) {
         if (data.type === 'chat') {
             appendChatMessage(data);
@@ -298,7 +317,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // BROADCAST SIGNAL TO ALL PEERS DATA CHANNELS
+    // BROADCAST SIGNAL TO ALL DATA CHANNELS
     function broadcastData(data) {
         Object.keys(peers).forEach(pid => {
             const peer = peers[pid];
@@ -318,9 +337,9 @@ document.addEventListener('DOMContentLoaded', () => {
         card.className = 'video-card mirror';
 
         const video = document.createElement('video');
-        video.autoplay = true;
+        video.setAttribute('playsinline', 'true');
+        video.setAttribute('autoplay', 'true');
         video.muted = true;
-        video.playsInline = true;
         if (localStream) video.srcObject = localStream;
 
         const avatarOverlay = document.createElement('div');
@@ -344,11 +363,13 @@ document.addEventListener('DOMContentLoaded', () => {
         card.appendChild(userInfo);
         videoGrid.appendChild(card);
 
+        video.play().catch(() => {});
+
         updateGridColumns();
         updateParticipantsList();
     }
 
-    // CREATE REMOTE PEER VIDEO CARD
+    // CREATE REMOTE PEER VIDEO CARD (OPTIMIZED FOR MOBILE & DESKTOP BROWSERS)
     function createRemoteVideoCard(peerId, stream, peerUsername, peerAvatarColor) {
         let card = document.getElementById(`video-card-${peerId}`);
         if (!card) {
@@ -357,8 +378,8 @@ document.addEventListener('DOMContentLoaded', () => {
             card.className = 'video-card';
 
             const video = document.createElement('video');
-            video.autoplay = true;
-            video.playsInline = true;
+            video.setAttribute('playsinline', 'true');
+            video.setAttribute('autoplay', 'true');
             video.srcObject = stream;
 
             const avatarOverlay = document.createElement('div');
@@ -382,16 +403,19 @@ document.addEventListener('DOMContentLoaded', () => {
             card.appendChild(userInfo);
             videoGrid.appendChild(card);
 
+            video.play().catch(e => console.log('Remote video playback:', e));
+
             updateGridColumns();
         } else {
             const video = card.querySelector('video');
             if (video && video.srcObject !== stream) {
                 video.srcObject = stream;
+                video.play().catch(e => console.log('Remote stream updated playback:', e));
             }
         }
     }
 
-    // REMOVE PEER
+    // REMOVE PEER ON DISCONNECT
     function removePeer(peerId) {
         if (peers[peerId]) {
             const peerUsername = peers[peerId].username;
@@ -496,7 +520,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // CALL TOOLBAR CONTROLS
+    // CONTROL BAR LISTENERS
     btnAudio.addEventListener('click', () => {
         if (!localStream) return;
         const audioTrack = localStream.getAudioTracks()[0];
@@ -542,7 +566,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
                 const screenTrack = screenStream.getVideoTracks()[0];
 
-                // Replace video track for all remote peer calls
                 Object.keys(peers).forEach(pid => {
                     const peer = peers[pid];
                     if (peer.call && peer.call.peerConnection) {

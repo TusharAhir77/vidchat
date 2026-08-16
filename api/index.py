@@ -9,24 +9,33 @@ app = Flask(__name__, template_folder=template_dir, static_folder=static_dir)
 app.config['SECRET_KEY'] = 'videochat_secret_key_2026'
 
 # In-memory peer registry for Vercel Serverless Function instances
-# Format: { room_name: { peer_id: { 'username': str, 'avatarColor': str, 'last_seen': float } } }
 rooms = {}
 
 def cleanup_stale_peers(room_name):
     if room_name not in rooms:
         return
     now = time.time()
-    # Remove peers inactive for more than 20 seconds
-    stale_ids = [pid for pid, info in rooms[room_name].items() if now - info['last_seen'] > 20]
+    # Remove peers inactive for more than 25 seconds
+    stale_ids = [pid for pid, info in rooms[room_name].items() if now - info['last_seen'] > 25]
     for pid in stale_ids:
         del rooms[room_name][pid]
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    return response
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/api/room', methods=['GET', 'POST'])
+@app.route('/api/room', methods=['GET', 'POST', 'OPTIONS'])
 def room_api():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+
     if request.method == 'POST':
         data = request.get_json(silent=True) or {}
         action = data.get('action')
