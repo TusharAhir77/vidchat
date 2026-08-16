@@ -1,813 +1,604 @@
-// OmniCall - Multi-User Cross-Device Group Video Calling Engine (Slot-Mesh + Serverless WebRTC)
+/**
+ * OmniCall – Cross-Device Group Video Call Engine
+ *
+ * HOW IT WORKS (no backend needed):
+ *  - PeerJS Cloud Server handles WebRTC signaling for free
+ *  - Each room has 8 named slots: <room>_slot_0 … <room>_slot_7
+ *  - First device claims slot_0, second claims slot_1, etc.
+ *  - On joining, every device dials ALL other slots — whoever
+ *    is there answers → live P2P video/audio across any device/network
+ *  - Free TURN relays ensure it works through mobile NAT/firewalls
+ */
 
-document.addEventListener('DOMContentLoaded', () => {
-    // DOM Elements - Login Screen
-    const loginScreen = document.getElementById('login-screen');
-    const callScreen = document.getElementById('call-screen');
-    const joinForm = document.getElementById('join-form');
-    const usernameInput = document.getElementById('username');
-    const roomNameInput = document.getElementById('room-name');
-    const loginVideoPreview = document.getElementById('login-video-preview');
-    const previewPlaceholder = document.getElementById('preview-placeholder');
-    const previewToggleAudio = document.getElementById('preview-toggle-audio');
-    const previewToggleVideo = document.getElementById('preview-toggle-video');
-    const colorDots = document.querySelectorAll('.color-dot');
+'use strict';
 
-    // DOM Elements - Call Header
-    const displayRoomName = document.getElementById('display-room-name');
-    const participantCountBadge = document.getElementById('participant-count-badge');
-    const sidebarPeerCount = document.getElementById('sidebar-peer-count');
-    const callTimer = document.getElementById('call-timer');
-    const btnCopyLink = document.getElementById('btn-copy-link');
-    const videoGrid = document.getElementById('video-grid');
-    
-    // Call Controls
-    const btnAudio = document.getElementById('btn-audio');
-    const btnVideo = document.getElementById('btn-video');
-    const btnScreen = document.getElementById('btn-screen');
-    const btnHand = document.getElementById('btn-hand');
-    const btnChatToggle = document.getElementById('btn-chat-toggle');
-    const btnPeopleToggle = document.getElementById('btn-people-toggle');
-    const btnLeave = document.getElementById('btn-leave');
+// ── Constants ─────────────────────────────────────────────────────
+const MAX_SLOTS = 8;
+const POLL_INTERVAL_MS = 4000;
 
-    // Sidebar & Chat Elements
-    const callSidebar = document.getElementById('call-sidebar');
-    const btnCloseSidebar = document.getElementById('btn-close-sidebar');
-    const tabChat = document.getElementById('tab-chat');
-    const tabPeople = document.getElementById('tab-people');
-    const panelChat = document.getElementById('panel-chat');
-    const panelPeople = document.getElementById('panel-people');
-    const chatMessages = document.getElementById('chat-messages');
-    const chatForm = document.getElementById('chat-form');
-    const chatInput = document.getElementById('chat-input');
-    const unreadChatBadge = document.getElementById('unread-chat-badge');
-    const participantsList = document.getElementById('participants-list');
-    const toastContainer = document.getElementById('toast-container');
+// Free TURN relays (metered.ca OpenRelay — works on mobile 4G/5G)
+const ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'turn:openrelay.metered.ca:80',           username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443',          username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:80?transport=tcp',  username: 'openrelayproject', credential: 'openrelayproject' },
+];
 
-    // WebRTC STUN + TURN Configuration (For cross-device NAT / mobile 4G/5G traversal)
-    const rtcConfig = {
-        iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' },
-            { urls: 'stun:stun3.l.google.com:19302' },
-            { urls: 'stun:stun4.l.google.com:19302' },
-            { urls: 'stun:global.stun.twilio.com:3478' },
-            { urls: 'stun:stun.cloudflare.com:3478' },
-            {
-                urls: 'turn:openrelay.metered.ca:80',
-                username: 'openrelayproject',
-                credential: 'openrelayproject'
-            },
-            {
-                urls: 'turn:openrelay.metered.ca:443',
-                username: 'openrelayproject',
-                credential: 'openrelayproject'
-            },
-            {
-                urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-                username: 'openrelayproject',
-                credential: 'openrelayproject'
-            }
-        ]
+// ── State ──────────────────────────────────────────────────────────
+let peer        = null;   // PeerJS instance
+let localStream = null;   // camera + mic stream
+let screenStream= null;
+let mySlotId    = null;   // e.g. "myroom_slot_2"
+let mySlotIdx   = null;
+let roomKey     = '';     // cleaned room name
+let myName      = '';
+let myColor     = '#3b82f6';
+let micOn       = true;
+let camOn       = true;
+let handUp      = false;
+let screenSharing = false;
+let timerStart  = null;
+let pollTimer   = null;
+let unread      = 0;
+
+// peerId → { call, name, color, micOn, camOn, handUp }
+const remotePeers = {};
+
+// ── DOM ────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const loginScreen  = $('login-screen');
+const callScreen   = $('call-screen');
+const previewVideo = $('preview-video');
+const previewAv    = $('preview-avatar');
+const btnPreMic    = $('btn-pre-mic');
+const btnPreCam    = $('btn-pre-cam');
+const joinForm     = $('join-form');
+const inpName      = $('inp-name');
+const inpRoom      = $('inp-room');
+const roomLabel    = $('room-label');
+const peerCount    = $('peer-count-pill');
+const callTimerEl  = $('call-timer');
+const videoGrid    = $('video-grid');
+const sidebar      = $('sidebar');
+const chatLog      = $('chat-log');
+const chatForm     = $('chat-form');
+const chatInp      = $('chat-inp');
+const chatBadge    = $('chat-badge');
+const peopleList   = $('people-list');
+const toastStack   = $('toasts');
+
+// ── Avatar color picker ────────────────────────────────────────────
+document.querySelectorAll('.color-swatch').forEach(el => {
+    el.addEventListener('click', () => {
+        document.querySelectorAll('.color-swatch').forEach(e => e.classList.remove('active'));
+        el.classList.add('active');
+        myColor = el.dataset.color;
+    });
+});
+
+// URL param pre-fill room
+const urlRoom = new URLSearchParams(location.search).get('room');
+if (urlRoom) inpRoom.value = urlRoom;
+
+// ── Preview media ──────────────────────────────────────────────────
+(async () => {
+    try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        previewVideo.srcObject = localStream;
+    } catch {
+        previewAv.classList.remove('hidden');
+        toast('Allow camera & mic permission to make video calls', 'warn');
+    }
+})();
+
+btnPreMic.addEventListener('click', () => {
+    micOn = !micOn;
+    localStream?.getAudioTracks().forEach(t => t.enabled = micOn);
+    btnPreMic.classList.toggle('off', !micOn);
+    btnPreMic.innerHTML = micOn
+        ? '<i class="fa-solid fa-microphone"></i>'
+        : '<i class="fa-solid fa-microphone-slash"></i>';
+});
+
+btnPreCam.addEventListener('click', () => {
+    camOn = !camOn;
+    localStream?.getVideoTracks().forEach(t => t.enabled = camOn);
+    btnPreCam.classList.toggle('off', !camOn);
+    btnPreCam.innerHTML = camOn
+        ? '<i class="fa-solid fa-video"></i>'
+        : '<i class="fa-solid fa-video-slash"></i>';
+    previewAv.classList.toggle('hidden', camOn);
+});
+
+// ── Join form ──────────────────────────────────────────────────────
+joinForm.addEventListener('submit', async e => {
+    e.preventDefault();
+    myName   = inpName.value.trim() || 'Guest';
+    roomKey  = (inpRoom.value.trim() || 'common-lounge')
+                 .toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!roomKey) roomKey = 'commonlounge';
+
+    if (!localStream) {
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        } catch {
+            toast('Could not access camera/mic. Audio-only mode.', 'warn');
+            // create silent audio-only stream so PeerJS calls still work
+            localStream = new MediaStream();
+        }
+    }
+
+    switchToCall();
+    claimSlot(0);
+});
+
+// ── Switch screens ─────────────────────────────────────────────────
+function switchToCall() {
+    loginScreen.classList.remove('active'); loginScreen.classList.add('hidden');
+    callScreen.classList.remove('hidden');  callScreen.classList.add('active');
+    roomLabel.textContent = inpRoom.value.trim() || 'common-lounge';
+    addLocalCard();
+    startTimer();
+}
+
+// ── Slot claim ─────────────────────────────────────────────────────
+function claimSlot(idx) {
+    if (idx >= MAX_SLOTS) {
+        // All slots full — use random id
+        const rnd = Math.random().toString(36).slice(2, 7);
+        initPeer(`${roomKey}_rnd_${rnd}`, true);
+        return;
+    }
+    const slotId = `${roomKey}_slot_${idx}`;
+    console.log(`Trying slot: ${slotId}`);
+    initPeer(slotId, false, idx);
+}
+
+// ── Init PeerJS ────────────────────────────────────────────────────
+function initPeer(peerId, isFallback, slotIdx = 0) {
+    peer = new Peer(peerId, {
+        // Use PeerJS public cloud server (handles signaling globally)
+        config: { iceServers: ICE_SERVERS },
+        debug: 0,
+    });
+
+    peer.on('open', id => {
+        console.log('✅ Peer connected to cloud signaling server:', id);
+        mySlotId  = id;
+        mySlotIdx = slotIdx;
+        // Dial all other slots immediately
+        dialAllSlots();
+        // Keep polling to catch latecomers
+        pollTimer = setInterval(dialAllSlots, POLL_INTERVAL_MS);
+    });
+
+    peer.on('error', err => {
+        if (err.type === 'unavailable-id') {
+            console.log(`Slot ${slotIdx} taken, trying ${slotIdx + 1}…`);
+            peer.destroy();
+            peer = null;
+            claimSlot(slotIdx + 1);
+        } else {
+            console.warn('PeerJS:', err.type, err.message);
+        }
+    });
+
+    // ── Incoming CALL (their device dials us) ──────────────────────
+    peer.on('call', incomingCall => {
+        const meta = incomingCall.metadata || {};
+        console.log(`📞 Incoming call from: ${meta.name} (${incomingCall.peer})`);
+        incomingCall.answer(localStream);
+        handleCall(incomingCall, meta.name || 'Participant', meta.color || '#8b5cf6');
+    });
+
+    // ── Incoming DATA (chat / status) ─────────────────────────────
+    peer.on('connection', conn => {
+        conn.on('data', data => handleData(data, conn.peer));
+    });
+}
+
+// ── Dial all room slots ────────────────────────────────────────────
+function dialAllSlots() {
+    for (let i = 0; i < MAX_SLOTS; i++) {
+        const slotId = `${roomKey}_slot_${i}`;
+        if (slotId !== mySlotId && !remotePeers[slotId]) {
+            dialPeer(slotId);
+        }
+    }
+}
+
+// ── Dial a specific peer ───────────────────────────────────────────
+function dialPeer(targetId) {
+    if (!peer || remotePeers[targetId]) return;
+
+    console.log(`📡 Dialing: ${targetId}`);
+    const call = peer.call(targetId, localStream, {
+        metadata: { name: myName, color: myColor }
+    });
+
+    if (!call) return;
+
+    // Mark as pending so we don't double-dial
+    remotePeers[targetId] = { pending: true };
+
+    call.on('stream', remoteStream => {
+        const peerName  = (call.metadata && call.metadata.name)  || 'Participant';
+        const peerColor = (call.metadata && call.metadata.color) || '#8b5cf6';
+        console.log(`🎥 Got stream from: ${peerName} (${targetId})`);
+        addRemoteCard(targetId, remoteStream, peerName, peerColor, call);
+        // Open data channel for chat/status
+        openDataConn(targetId);
+    });
+
+    call.on('close', () => removeRemote(targetId));
+    call.on('error', () => { delete remotePeers[targetId]; });
+}
+
+// ── Handle incoming call stream ────────────────────────────────────
+function handleCall(call, name, color) {
+    const pid = call.peer;
+
+    call.on('stream', remoteStream => {
+        console.log(`🎥 Received stream from ${name} (${pid})`);
+        addRemoteCard(pid, remoteStream, name, color, call);
+        openDataConn(pid);
+    });
+
+    call.on('close', () => removeRemote(pid));
+    call.on('error', () => removeRemote(pid));
+}
+
+// ── Open data connection for chat/status ──────────────────────────
+function openDataConn(targetId) {
+    if (!peer) return;
+    if (remotePeers[targetId] && remotePeers[targetId].dataConn) return;
+
+    const conn = peer.connect(targetId);
+    conn.on('open', () => {
+        if (remotePeers[targetId]) remotePeers[targetId].dataConn = conn;
+    });
+    conn.on('data', data => handleData(data, targetId));
+}
+
+// ── Handle incoming data ───────────────────────────────────────────
+function handleData(data, fromId) {
+    if (!data || !data.type) return;
+    if (data.type === 'chat') {
+        appendBubble(data.name, data.color, data.text, data.time, false, fromId);
+        if (sidebar.classList.contains('hidden') || !$('chat-panel').classList.contains('active')) {
+            unread++;
+            chatBadge.textContent = unread;
+            chatBadge.classList.remove('hidden');
+        }
+    } else if (data.type === 'status') {
+        const p = remotePeers[fromId];
+        if (!p) return;
+        if (data.action === 'mic')  { p.micOn = data.value; updateRemoteNameTag(fromId); updatePeopleList(); }
+        if (data.action === 'cam')  { p.camOn = data.value; toggleRemoteAvatar(fromId, data.value); updatePeopleList(); }
+        if (data.action === 'hand') { p.handUp = data.value; toggleHandBadge(fromId, data.value); updatePeopleList(); }
+    }
+}
+
+// ── Broadcast data to all peers ───────────────────────────────────
+function broadcast(data) {
+    Object.values(remotePeers).forEach(p => {
+        if (p.dataConn && p.dataConn.open) p.dataConn.send(data);
+    });
+}
+
+// ── Video cards ────────────────────────────────────────────────────
+function addLocalCard() {
+    if ($('local-card')) return;
+    const card = makeCard('local-card', localStream, myName + ' (You)', myColor, true);
+    videoGrid.appendChild(card);
+    updateGrid();
+    updatePeopleList();
+}
+
+function addRemoteCard(pid, stream, name, color, call) {
+    let existing = $('card-' + pid);
+    if (existing) {
+        // Update stream if reconnecting
+        existing.querySelector('video').srcObject = stream;
+        return;
+    }
+
+    remotePeers[pid] = { ...(remotePeers[pid] || {}), call, name, color, micOn: true, camOn: true, handUp: false };
+
+    const card = makeCard('card-' + pid, stream, name, color, false);
+    videoGrid.appendChild(card);
+    updateGrid();
+    updatePeopleList();
+    toast(`${name} joined`, 'info');
+}
+
+function makeCard(id, stream, name, color, isLocal) {
+    const card = document.createElement('div');
+    card.id = id;
+    card.className = 'vid-card' + (isLocal ? ' local' : '');
+
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.playsinline = true;
+    if (isLocal) video.muted = true;
+    video.srcObject = stream;
+    video.play().catch(() => {});
+
+    const avCover = document.createElement('div');
+    avCover.className = 'av-cover';
+    avCover.style.display = 'none';
+    const avCircle = document.createElement('div');
+    avCircle.className = 'av-circle';
+    avCircle.style.background = color;
+    avCircle.textContent = name.charAt(0).toUpperCase();
+    avCover.appendChild(avCircle);
+
+    const nameTag = document.createElement('div');
+    nameTag.className = 'name-tag';
+    nameTag.innerHTML = `<i class="fa-solid fa-microphone mic-icon"></i><span>${name}</span>`;
+
+    card.appendChild(video);
+    card.appendChild(avCover);
+    card.appendChild(nameTag);
+    return card;
+}
+
+function removeRemote(pid) {
+    const info = remotePeers[pid];
+    const name = info ? info.name : pid;
+    delete remotePeers[pid];
+    const card = $('card-' + pid);
+    if (card) card.remove();
+    updateGrid();
+    updatePeopleList();
+    toast(`${name} left`, 'info');
+}
+
+function updateGrid() {
+    const count = videoGrid.children.length;
+    videoGrid.setAttribute('data-count', Math.min(count, 9));
+    peerCount.innerHTML = `<i class="fa-solid fa-user"></i> ${count}`;
+}
+
+// ── Remote card UI helpers ─────────────────────────────────────────
+function updateRemoteNameTag(pid) {
+    const card = $('card-' + pid);
+    if (!card) return;
+    const p = remotePeers[pid];
+    const icon = card.querySelector('.mic-icon');
+    if (icon) icon.className = `fa-solid ${p.micOn ? 'fa-microphone' : 'fa-microphone-slash'} mic-icon${p.micOn ? '' : ' muted'}`;
+}
+
+function toggleRemoteAvatar(pid, camEnabled) {
+    const card = $('card-' + pid);
+    if (!card) return;
+    card.querySelector('.av-cover').style.display = camEnabled ? 'none' : 'flex';
+}
+
+function toggleHandBadge(pid, show) {
+    const card = $('card-' + pid);
+    if (!card) return;
+    let badge = card.querySelector('.hand-badge');
+    if (show) {
+        if (!badge) {
+            badge = document.createElement('div');
+            badge.className = 'hand-badge';
+            badge.innerHTML = '<i class="fa-solid fa-hand"></i>';
+            card.appendChild(badge);
+        }
+    } else if (badge) badge.remove();
+}
+
+// ── People list ────────────────────────────────────────────────────
+function updatePeopleList() {
+    peopleList.innerHTML = '';
+
+    const addItem = (name, color, micState, camState, handState) => {
+        const li = document.createElement('li');
+        li.className = 'person-item';
+        li.innerHTML = `
+            <div class="person-left">
+                <div class="person-av" style="background:${color}">${name.charAt(0).toUpperCase()}</div>
+                <span class="person-name">${name}</span>
+            </div>
+            <div class="person-icons">
+                ${handState ? `<i class="fa-solid fa-hand" style="color:var(--warn)"></i>` : ''}
+                <i class="fa-solid ${micState ? 'fa-microphone' : 'fa-microphone-slash'}" style="color:${micState ? 'var(--text-3)' : 'var(--danger)'}"></i>
+                <i class="fa-solid ${camState ? 'fa-video' : 'fa-video-slash'}" style="color:${camState ? 'var(--text-3)' : 'var(--danger)'}"></i>
+            </div>`;
+        peopleList.appendChild(li);
     };
 
-    // State Variables
-    let peerJsInstance = null;
-    let localStream = null;
-    let screenStream = null;
-    let selfSid = null;
-    let username = '';
-    let roomName = 'common lounge';
-    let avatarColor = '#3b82f6';
-    let isAudioEnabled = true;
-    let isVideoEnabled = true;
-    let isScreenSharing = false;
-    let isHandRaised = false;
-    let isLocalCardCreated = false;
-    let unreadChatCount = 0;
-    let callStartTime = null;
-    let heartbeatTimer = null;
-    let currentSlotIndex = 0;
-
-    // Active Remote Peers Storage: { [peerId]: { call, dataConn, username, avatarColor, audio, video, handRaised } }
-    const peers = {};
-
-    // Check URL parameters for direct room joining (?room=xyz)
-    const urlParams = new URLSearchParams(window.location.search);
-    const roomParam = urlParams.get('room');
-    if (roomParam) {
-        roomNameInput.value = roomParam;
-    }
-
-    // Avatar Color Selection
-    colorDots.forEach(dot => {
-        dot.addEventListener('click', () => {
-            colorDots.forEach(d => d.classList.remove('active'));
-            dot.classList.add('active');
-            avatarColor = dot.getAttribute('data-color');
-        });
+    addItem(myName + ' (You)', myColor, micOn, camOn, handUp);
+    Object.values(remotePeers).forEach(p => {
+        if (!p.pending && p.name) addItem(p.name, p.color, p.micOn, p.camOn, p.handUp);
     });
+}
 
-    // Initialize Camera / Microphone Media Preview
-    async function initPreviewMedia() {
+// ── Controls ───────────────────────────────────────────────────────
+$('btn-mic').addEventListener('click', () => {
+    micOn = !micOn;
+    localStream?.getAudioTracks().forEach(t => t.enabled = micOn);
+    const btn = $('btn-mic');
+    btn.classList.toggle('off', !micOn);
+    btn.innerHTML = micOn
+        ? '<i class="fa-solid fa-microphone"></i><span>Mic</span>'
+        : '<i class="fa-solid fa-microphone-slash"></i><span>Mic</span>';
+    // Update local card tag
+    const localCard = $('local-card');
+    if (localCard) {
+        const icon = localCard.querySelector('.mic-icon');
+        if (icon) icon.className = `fa-solid ${micOn ? 'fa-microphone' : 'fa-microphone-slash'} mic-icon${micOn ? '' : ' muted'}`;
+    }
+    broadcast({ type: 'status', action: 'mic', value: micOn });
+    updatePeopleList();
+});
+
+$('btn-cam').addEventListener('click', () => {
+    camOn = !camOn;
+    localStream?.getVideoTracks().forEach(t => t.enabled = camOn);
+    const btn = $('btn-cam');
+    btn.classList.toggle('off', !camOn);
+    btn.innerHTML = camOn
+        ? '<i class="fa-solid fa-video"></i><span>Camera</span>'
+        : '<i class="fa-solid fa-video-slash"></i><span>Camera</span>';
+    const localCard = $('local-card');
+    if (localCard) localCard.querySelector('.av-cover').style.display = camOn ? 'none' : 'flex';
+    broadcast({ type: 'status', action: 'cam', value: camOn });
+    updatePeopleList();
+});
+
+$('btn-screen').addEventListener('click', async () => {
+    if (!screenSharing) {
         try {
-            localStream = await navigator.mediaDevices.getUserMedia({
-                video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-                audio: true
-            });
-            loginVideoPreview.srcObject = localStream;
-            previewPlaceholder.style.display = 'none';
-        } catch (err) {
-            console.warn('Could not acquire camera/microphone:', err);
-            previewPlaceholder.style.display = 'flex';
-            previewPlaceholder.innerHTML = '<i class="fa-solid fa-video-slash"></i>';
-            showToast('Camera/Mic permission needed for video call.', 'warning');
-        }
-    }
-    initPreviewMedia();
-
-    // Login Preview Controls
-    previewToggleAudio.addEventListener('click', () => {
-        if (localStream && localStream.getAudioTracks().length > 0) {
-            isAudioEnabled = !isAudioEnabled;
-            localStream.getAudioTracks()[0].enabled = isAudioEnabled;
-            previewToggleAudio.classList.toggle('off', !isAudioEnabled);
-            previewToggleAudio.innerHTML = isAudioEnabled ? 
-                '<i class="fa-solid fa-microphone"></i>' : 
-                '<i class="fa-solid fa-microphone-slash"></i>';
-        }
-    });
-
-    previewToggleVideo.addEventListener('click', () => {
-        if (localStream && localStream.getVideoTracks().length > 0) {
-            isVideoEnabled = !isVideoEnabled;
-            localStream.getVideoTracks()[0].enabled = isVideoEnabled;
-            previewToggleVideo.classList.toggle('off', !isVideoEnabled);
-            previewToggleVideo.innerHTML = isVideoEnabled ? 
-                '<i class="fa-solid fa-video"></i>' : 
-                '<i class="fa-solid fa-video-slash"></i>';
-            previewPlaceholder.style.display = isVideoEnabled ? 'none' : 'flex';
-        }
-    });
-
-    // JOIN FORM SUBMIT
-    joinForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        username = usernameInput.value.trim();
-        roomName = roomNameInput.value.trim().toLowerCase() || 'common lounge';
-
-        if (!username) return;
-
-        // Switch to Main Call UI
-        loginScreen.classList.remove('active');
-        loginScreen.classList.add('hidden');
-        callScreen.classList.remove('hidden');
-        callScreen.classList.add('active');
-
-        displayRoomName.textContent = roomName === 'common lounge' ? 'Common Lounge' : roomName;
-        
-        updateControlButtonState(btnAudio, isAudioEnabled, 'fa-microphone', 'fa-microphone-slash');
-        updateControlButtonState(btnVideo, isVideoEnabled, 'fa-video', 'fa-video-slash');
-
-        // Claim slot in room & start cross-device engine
-        claimRoomSlot(0);
-        startCallTimer();
-    });
-
-    // CLAIM DETERMINISTIC ROOM SLOT FOR CROSS-DEVICE CONNECTIVITY
-    function claimRoomSlot(slotIdx) {
-        if (slotIdx >= 10) {
-            // Fallback to random peer ID if all 10 slots occupied
-            const cleanRoom = roomName.replace(/[^a-zA-Z0-9]/g, '') || 'lounge';
-            const randomId = Math.random().toString(36).substring(2, 7);
-            initPeerEngine(`omnicall_${cleanRoom}_p_${randomId}`);
-            return;
-        }
-
-        currentSlotIndex = slotIdx;
-        const cleanRoom = roomName.replace(/[^a-zA-Z0-9]/g, '') || 'lounge';
-        const targetSlotId = `omnicall_${cleanRoom}_s${slotIdx}`;
-
-        console.log(`Attempting to claim room slot ${slotIdx}: ${targetSlotId}`);
-        initPeerEngine(targetSlotId, slotIdx);
-    }
-
-    // INITIALIZE PEER ENGINE WITH SPECIFIC PEER ID
-    function initPeerEngine(peerId, slotIdx = 0) {
-        peerJsInstance = new Peer(peerId, { config: rtcConfig, debug: 1 });
-
-        peerJsInstance.on('open', (id) => {
-            console.log(`Successfully claimed slot & joined room with Peer ID: ${id}`);
-            selfSid = id;
-            
-            createLocalVideoCard();
-
-            // Dial all other room slots (0 to 9) to ensure instant mesh connection across devices
-            connectToRoomSlots();
-            
-            // Poll /api/room API & heartbeat
-            pollRoomPeers();
-            heartbeatTimer = setInterval(() => {
-                pollRoomPeers();
-                connectToRoomSlots();
-            }, 3500);
-        });
-
-        // If slot ID is taken by another device, try next slot
-        peerJsInstance.on('error', (err) => {
-            if (err.type === 'unavailable-id') {
-                console.log(`Slot ${slotIdx} occupied by another device, trying slot ${slotIdx + 1}...`);
-                peerJsInstance.destroy();
-                claimRoomSlot(slotIdx + 1);
-            } else {
-                console.warn('PeerJS notice:', err);
-            }
-        });
-
-        // Handle Incoming Video Call from Remote Device
-        peerJsInstance.on('call', (call) => {
-            const peerUsername = (call.metadata && call.metadata.username) ? call.metadata.username : 'Participant';
-            const peerAvatarColor = (call.metadata && call.metadata.avatarColor) ? call.metadata.avatarColor : '#8b5cf6';
-
-            console.log(`Incoming call from remote device: ${peerUsername} (${call.peer})`);
-            call.answer(localStream);
-
-            call.on('stream', (remoteStream) => {
-                addOrUpdatePeer(call.peer, peerUsername, peerAvatarColor, call, null, remoteStream);
-            });
-
-            call.on('close', () => removePeer(call.peer));
-            call.on('error', () => removePeer(call.peer));
-        });
-
-        // Handle Incoming Data Connection for Chat & Actions
-        peerJsInstance.on('connection', (dataConn) => {
-            dataConn.on('data', (data) => handleIncomingPeerData(data, dataConn.peer));
-        });
-    }
-
-    // DIAL ALL ROOM SLOTS TO ESTABLISH DIRECT WEBRTC P2P MESH
-    function connectToRoomSlots() {
-        if (!selfSid || !peerJsInstance) return;
-        const cleanRoom = roomName.replace(/[^a-zA-Z0-9]/g, '') || 'lounge';
-
-        for (let i = 0; i < 8; i++) {
-            const slotId = `omnicall_${cleanRoom}_s${i}`;
-            
-            // Do not call self and do not re-call already connected active peers
-            if (slotId !== selfSid && !peers[slotId]) {
-                dialPeer(slotId);
-            }
-        }
-    }
-
-    // DIAL TARGET PEER ID
-    function dialPeer(targetPeerId, customName = null, customColor = null) {
-        if (!peerJsInstance || peers[targetPeerId]) return;
-
-        console.log(`Dialing target peer: ${targetPeerId}`);
-        const call = peerJsInstance.call(targetPeerId, localStream, {
-            metadata: { username: username, avatarColor: avatarColor }
-        });
-
-        const dataConn = peerJsInstance.connect(targetPeerId);
-
-        if (call) {
-            call.on('stream', (remoteStream) => {
-                const peerName = customName || (call.metadata && call.metadata.username) || 'Participant';
-                const peerColor = customColor || (call.metadata && call.metadata.avatarColor) || '#8b5cf6';
-                addOrUpdatePeer(targetPeerId, peerName, peerColor, call, dataConn, remoteStream);
-            });
-            call.on('close', () => removePeer(targetPeerId));
-            call.on('error', () => removePeer(targetPeerId));
-        }
-
-        if (dataConn) {
-            dataConn.on('data', (data) => handleIncomingPeerData(data, targetPeerId));
-        }
-    }
-
-    // POLL SERVERLESS /API/ROOM AS SECONDARY DISCOVERY BACKUP
-    async function pollRoomPeers() {
-        if (!selfSid) return;
-        try {
-            const res = await fetch(`/api/room?room=${encodeURIComponent(roomName)}&peerId=${encodeURIComponent(selfSid)}&username=${encodeURIComponent(username)}&avatarColor=${encodeURIComponent(avatarColor)}`);
-            if (!res.ok) return;
-
-            const data = await res.json();
-            const activePeers = data.peers || [];
-
-            activePeers.forEach(peerInfo => {
-                const targetPeerId = peerInfo.peerId;
-                if (!peers[targetPeerId] && targetPeerId !== selfSid) {
-                    dialPeer(targetPeerId, peerInfo.username, peerInfo.avatarColor);
+            screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+            const track = screenStream.getVideoTracks()[0];
+            // Replace video track in all active peer calls
+            Object.values(remotePeers).forEach(p => {
+                if (p.call && p.call.peerConnection) {
+                    const sender = p.call.peerConnection.getSenders().find(s => s.track?.kind === 'video');
+                    if (sender) sender.replaceTrack(track);
                 }
             });
-        } catch (err) {
-            // Silence background polling notice if running strictly client-side
-        }
-    }
-
-    // ADD OR UPDATE PEER RECORD & VIDEO CARD
-    function addOrUpdatePeer(peerId, peerUsername, peerAvatarColor, call, dataConn, stream) {
-        if (!peers[peerId]) {
-            showToast(`${peerUsername} connected`, 'info');
-        }
-
-        peers[peerId] = {
-            call: call,
-            dataConn: dataConn || (peers[peerId] ? peers[peerId].dataConn : null),
-            username: peerUsername,
-            avatarColor: peerAvatarColor,
-            audio: true,
-            video: true,
-            handRaised: false
-        };
-
-        createRemoteVideoCard(peerId, stream, peerUsername, peerAvatarColor);
-        updateParticipantCount();
-        updateParticipantsList();
-    }
-
-    // HANDLE INCOMING PEER DATA (CHAT & ACTION SIGNALS)
-    function handleIncomingPeerData(data, senderPeerId) {
-        if (data.type === 'chat') {
-            appendChatMessage(data);
-            if (callSidebar.classList.contains('hidden') || panelChat.classList.contains('hidden')) {
-                unreadChatCount++;
-                unreadChatBadge.textContent = unreadChatCount;
-                unreadChatBadge.classList.remove('hidden');
-            }
-        } else if (data.type === 'action') {
-            const peer = peers[senderPeerId];
-            if (peer) {
-                if (data.action === 'audio') {
-                    peer.audio = data.value;
-                    updatePeerAudioUI(senderPeerId, data.value);
-                } else if (data.action === 'video') {
-                    peer.video = data.value;
-                    updatePeerVideoUI(senderPeerId, data.value);
-                } else if (data.action === 'hand') {
-                    peer.handRaised = data.value;
-                    updatePeerHandUI(senderPeerId, data.value);
-                }
-                updateParticipantsList();
-            }
-        }
-    }
-
-    // BROADCAST SIGNAL TO ALL DATA CHANNELS
-    function broadcastData(data) {
-        Object.keys(peers).forEach(pid => {
-            const peer = peers[pid];
-            if (peer.dataConn && peer.dataConn.open) {
-                peer.dataConn.send(data);
-            }
-        });
-    }
-
-    // CREATE LOCAL USER VIDEO CARD (GUARDED AGAINST DUPLICATES)
-    function createLocalVideoCard() {
-        if (isLocalCardCreated) return;
-        isLocalCardCreated = true;
-
-        const card = document.createElement('div');
-        card.id = `video-card-${selfSid}`;
-        card.className = 'video-card mirror';
-
-        const video = document.createElement('video');
-        video.setAttribute('playsinline', 'true');
-        video.setAttribute('autoplay', 'true');
-        video.muted = true;
-        if (localStream) video.srcObject = localStream;
-
-        const avatarOverlay = document.createElement('div');
-        avatarOverlay.className = 'video-avatar-overlay';
-        avatarOverlay.style.display = isVideoEnabled ? 'none' : 'flex';
-        avatarOverlay.innerHTML = `
-            <div class="video-avatar-circle" style="background: ${avatarColor}">
-                ${username.charAt(0).toUpperCase()}
-            </div>
-        `;
-
-        const userInfo = document.createElement('div');
-        userInfo.className = 'card-user-info';
-        userInfo.innerHTML = `
-            <i class="fa-solid ${isAudioEnabled ? 'fa-microphone' : 'fa-microphone-slash muted'} audio-status-icon"></i>
-            <span>${username} (You)</span>
-        `;
-
-        card.appendChild(video);
-        card.appendChild(avatarOverlay);
-        card.appendChild(userInfo);
-        videoGrid.appendChild(card);
-
-        video.play().catch(() => {});
-
-        updateGridColumns();
-        updateParticipantsList();
-    }
-
-    // CREATE REMOTE PEER VIDEO CARD
-    function createRemoteVideoCard(peerId, stream, peerUsername, peerAvatarColor) {
-        let card = document.getElementById(`video-card-${peerId}`);
-        if (!card) {
-            card = document.createElement('div');
-            card.id = `video-card-${peerId}`;
-            card.className = 'video-card';
-
-            const video = document.createElement('video');
-            video.setAttribute('playsinline', 'true');
-            video.setAttribute('autoplay', 'true');
-            video.srcObject = stream;
-
-            const avatarOverlay = document.createElement('div');
-            avatarOverlay.className = 'video-avatar-overlay';
-            avatarOverlay.style.display = 'none';
-            avatarOverlay.innerHTML = `
-                <div class="video-avatar-circle" style="background: ${peerAvatarColor}">
-                    ${peerUsername.charAt(0).toUpperCase()}
-                </div>
-            `;
-
-            const userInfo = document.createElement('div');
-            userInfo.className = 'card-user-info';
-            userInfo.innerHTML = `
-                <i class="fa-solid fa-microphone audio-status-icon"></i>
-                <span>${peerUsername}</span>
-            `;
-
-            card.appendChild(video);
-            card.appendChild(avatarOverlay);
-            card.appendChild(userInfo);
-            videoGrid.appendChild(card);
-
-            video.play().catch(e => console.log('Remote video playback:', e));
-
-            updateGridColumns();
-        } else {
-            const video = card.querySelector('video');
-            if (video && video.srcObject !== stream) {
-                video.srcObject = stream;
-                video.play().catch(e => console.log('Remote stream updated playback:', e));
-            }
-        }
-    }
-
-    // REMOVE PEER ON DISCONNECT
-    function removePeer(peerId) {
-        if (peers[peerId]) {
-            const peerUsername = peers[peerId].username;
-            if (peers[peerId].call) peers[peerId].call.close();
-            if (peers[peerId].dataConn) peers[peerId].dataConn.close();
-
-            const card = document.getElementById(`video-card-${peerId}`);
-            if (card) card.remove();
-
-            delete peers[peerId];
-            showToast(`${peerUsername} left the call`, 'info');
-            updateGridColumns();
-            updateParticipantCount();
-            updateParticipantsList();
-        }
-    }
-
-    // DYNAMIC GRID COLUMNS
-    function updateGridColumns() {
-        const totalCards = videoGrid.children.length;
-        videoGrid.setAttribute('data-peer-count', totalCards);
-    }
-
-    // PARTICIPANT COUNT & LIST
-    function updateParticipantCount() {
-        const total = Object.keys(peers).length + 1;
-        participantCountBadge.innerHTML = `<i class="fa-solid fa-user"></i> ${total}`;
-        sidebarPeerCount.textContent = total;
-    }
-
-    function updateParticipantsList() {
-        participantsList.innerHTML = '';
-
-        // Self
-        const selfItem = document.createElement('div');
-        selfItem.className = 'participant-item';
-        selfItem.innerHTML = `
-            <div class="participant-info">
-                <div class="participant-avatar" style="background: ${avatarColor}">
-                    ${username.charAt(0).toUpperCase()}
-                </div>
-                <span>${username} (You)</span>
-            </div>
-            <div class="participant-icons">
-                ${isHandRaised ? '<i class="fa-solid fa-hand" style="color: var(--warning-color)"></i>' : ''}
-                <i class="fa-solid ${isAudioEnabled ? 'fa-microphone' : 'fa-microphone-slash'}" style="color: ${isAudioEnabled ? 'var(--text-muted)' : 'var(--danger-color)'}"></i>
-                <i class="fa-solid ${isVideoEnabled ? 'fa-video' : 'fa-video-slash'}" style="color: ${isVideoEnabled ? 'var(--text-muted)' : 'var(--danger-color)'}"></i>
-            </div>
-        `;
-        participantsList.appendChild(selfItem);
-
-        // Peers
-        Object.keys(peers).forEach(pid => {
-            const peer = peers[pid];
-            const item = document.createElement('div');
-            item.className = 'participant-item';
-            item.innerHTML = `
-                <div class="participant-info">
-                    <div class="participant-avatar" style="background: ${peer.avatarColor}">
-                        ${peer.username.charAt(0).toUpperCase()}
-                    </div>
-                    <span>${peer.username}</span>
-                </div>
-                <div class="participant-icons">
-                    ${peer.handRaised ? '<i class="fa-solid fa-hand" style="color: var(--warning-color)"></i>' : ''}
-                    <i class="fa-solid ${peer.audio ? 'fa-microphone' : 'fa-microphone-slash'}" style="color: ${peer.audio ? 'var(--text-muted)' : 'var(--danger-color)'}"></i>
-                    <i class="fa-solid ${peer.video ? 'fa-video' : 'fa-video-slash'}" style="color: ${peer.video ? 'var(--text-muted)' : 'var(--danger-color)'}"></i>
-                </div>
-            `;
-            participantsList.appendChild(item);
-        });
-    }
-
-    // PEER UI UPDATERS
-    function updatePeerAudioUI(peerId, enabled) {
-        const card = document.getElementById(`video-card-${peerId}`);
-        if (!card) return;
-        const icon = card.querySelector('.audio-status-icon');
-        if (icon) icon.className = `fa-solid ${enabled ? 'fa-microphone' : 'fa-microphone-slash muted'} audio-status-icon`;
-    }
-
-    function updatePeerVideoUI(peerId, enabled) {
-        const card = document.getElementById(`video-card-${peerId}`);
-        if (!card) return;
-        const avatarOverlay = card.querySelector('.video-avatar-overlay');
-        if (avatarOverlay) avatarOverlay.style.display = enabled ? 'none' : 'flex';
-    }
-
-    function updatePeerHandUI(peerId, raised) {
-        const card = document.getElementById(`video-card-${peerId}`);
-        if (!card) return;
-        let handBadge = card.querySelector('.hand-raised-badge');
-        if (raised) {
-            if (!handBadge) {
-                handBadge = document.createElement('div');
-                handBadge.className = 'hand-raised-badge';
-                handBadge.innerHTML = '<i class="fa-solid fa-hand"></i>';
-                card.appendChild(handBadge);
-            }
-        } else if (handBadge) {
-            handBadge.remove();
-        }
-    }
-
-    // CONTROL BAR LISTENERS
-    btnAudio.addEventListener('click', () => {
-        if (!localStream) return;
-        const audioTrack = localStream.getAudioTracks()[0];
-        if (audioTrack) {
-            isAudioEnabled = !isAudioEnabled;
-            audioTrack.enabled = isAudioEnabled;
-            updateControlButtonState(btnAudio, isAudioEnabled, 'fa-microphone', 'fa-microphone-slash');
-            
-            const localCard = document.getElementById(`video-card-${selfSid}`);
-            if (localCard) {
-                const icon = localCard.querySelector('.audio-status-icon');
-                if (icon) icon.className = `fa-solid ${isAudioEnabled ? 'fa-microphone' : 'fa-microphone-slash muted'} audio-status-icon`;
-            }
-
-            broadcastData({ type: 'action', action: 'audio', value: isAudioEnabled });
-            updateParticipantsList();
-        }
-    });
-
-    btnVideo.addEventListener('click', () => {
-        if (!localStream) return;
-        const videoTrack = localStream.getVideoTracks()[0];
-        if (videoTrack) {
-            isVideoEnabled = !isVideoEnabled;
-            videoTrack.enabled = isVideoEnabled;
-            updateControlButtonState(btnVideo, isVideoEnabled, 'fa-video', 'fa-video-slash');
-            
-            const localCard = document.getElementById(`video-card-${selfSid}`);
-            if (localCard) {
-                const overlay = localCard.querySelector('.video-avatar-overlay');
-                if (overlay) overlay.style.display = isVideoEnabled ? 'none' : 'flex';
-            }
-
-            broadcastData({ type: 'action', action: 'video', value: isVideoEnabled });
-            updateParticipantsList();
-        }
-    });
-
-    // SCREEN SHARING
-    btnScreen.addEventListener('click', async () => {
-        if (!isScreenSharing) {
-            try {
-                screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-                const screenTrack = screenStream.getVideoTracks()[0];
-
-                Object.keys(peers).forEach(pid => {
-                    const peer = peers[pid];
-                    if (peer.call && peer.call.peerConnection) {
-                        const senders = peer.call.peerConnection.getSenders();
-                        const sender = senders.find(s => s.track && s.track.kind === 'video');
-                        if (sender) sender.replaceTrack(screenTrack);
-                    }
-                });
-
-                const localVideo = document.querySelector(`#video-card-${selfSid} video`);
-                if (localVideo) localVideo.srcObject = screenStream;
-
-                isScreenSharing = true;
-                btnScreen.classList.add('active');
-
-                screenTrack.onended = () => stopScreenSharing();
-            } catch (err) {
-                console.warn('Screen share canceled:', err);
-            }
-        } else {
-            stopScreenSharing();
-        }
-    });
-
-    function stopScreenSharing() {
-        if (screenStream) {
-            screenStream.getTracks().forEach(t => t.stop());
-            screenStream = null;
-        }
-
-        const videoTrack = localStream.getVideoTracks()[0];
-        Object.keys(peers).forEach(pid => {
-            const peer = peers[pid];
-            if (peer.call && peer.call.peerConnection && videoTrack) {
-                const senders = peer.call.peerConnection.getSenders();
-                const sender = senders.find(s => s.track && s.track.kind === 'video');
-                if (sender) sender.replaceTrack(videoTrack);
-            }
-        });
-
-        const localVideo = document.querySelector(`#video-card-${selfSid} video`);
-        if (localVideo) localVideo.srcObject = localStream;
-
-        isScreenSharing = false;
-        btnScreen.classList.remove('active');
-    }
-
-    // HAND RAISE
-    btnHand.addEventListener('click', () => {
-        isHandRaised = !isHandRaised;
-        btnHand.classList.toggle('active', isHandRaised);
-        
-        const localCard = document.getElementById(`video-card-${selfSid}`);
-        if (localCard) {
-            let handBadge = localCard.querySelector('.hand-raised-badge');
-            if (isHandRaised) {
-                if (!handBadge) {
-                    handBadge = document.createElement('div');
-                    handBadge.className = 'hand-raised-badge';
-                    handBadge.innerHTML = '<i class="fa-solid fa-hand"></i>';
-                    localCard.appendChild(handBadge);
-                }
-            } else if (handBadge) {
-                handBadge.remove();
-            }
-        }
-
-        broadcastData({ type: 'action', action: 'hand', value: isHandRaised });
-        updateParticipantsList();
-    });
-
-    // CHAT & SIDEBAR TOGGLES
-    btnChatToggle.addEventListener('click', () => {
-        toggleSidebar();
-        switchSidebarTab(tabChat, panelChat);
-        unreadChatCount = 0;
-        unreadChatBadge.classList.add('hidden');
-    });
-
-    btnPeopleToggle.addEventListener('click', () => {
-        toggleSidebar();
-        switchSidebarTab(tabPeople, panelPeople);
-    });
-
-    btnCloseSidebar.addEventListener('click', () => {
-        callSidebar.classList.add('hidden');
-    });
-
-    tabChat.addEventListener('click', () => switchSidebarTab(tabChat, panelChat));
-    tabPeople.addEventListener('click', () => switchSidebarTab(tabPeople, panelPeople));
-
-    function toggleSidebar() {
-        callSidebar.classList.toggle('hidden');
-    }
-
-    function switchSidebarTab(tabBtn, panel) {
-        document.querySelectorAll('.tab-btn').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.sidebar-panel').forEach(p => p.classList.remove('active'));
-        tabBtn.classList.add('active');
-        panel.classList.add('active');
-    }
-
-    // CHAT FORM SUBMIT
-    chatForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        const msg = chatInput.value.trim();
-        if (!msg) return;
-
-        const chatPayload = {
-            type: 'chat',
-            senderSid: selfSid,
-            username: username,
-            avatarColor: avatarColor,
-            message: msg,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        };
-
-        appendChatMessage(chatPayload);
-        broadcastData(chatPayload);
-
-        chatInput.value = '';
-    });
-
-    function appendChatMessage(data) {
-        const isSelf = data.senderSid === selfSid;
-        const bubble = document.createElement('div');
-        bubble.className = `chat-bubble ${isSelf ? 'self' : 'peer'}`;
-
-        bubble.innerHTML = `
-            <div class="chat-author">
-                <span style="color: ${data.avatarColor}">${data.username}</span>
-                <span>${data.timestamp || ''}</span>
-            </div>
-            <div class="chat-text">${escapeHtml(data.message)}</div>
-        `;
-
-        chatMessages.appendChild(bubble);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-    }
-
-    // LEAVE CALL & UNLOAD
-    btnLeave.addEventListener('click', () => {
-        if (confirm('Are you sure you want to leave the call?')) {
-            leaveCall();
-            window.location.reload();
-        }
-    });
-
-    window.addEventListener('beforeunload', leaveCall);
-
-    function leaveCall() {
-        if (heartbeatTimer) clearInterval(heartbeatTimer);
-        if (selfSid) {
-            fetch('/api/room', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'leave', room: roomName, peerId: selfSid }),
-                keepalive: true
-            }).catch(() => {});
-        }
-    }
-
-    // COPY INVITATION LINK
-    btnCopyLink.addEventListener('click', () => {
-        const inviteUrl = `${window.location.origin}/?room=${encodeURIComponent(roomName)}`;
-        navigator.clipboard.writeText(inviteUrl).then(() => {
-            showToast('Room link copied to clipboard!', 'success');
-        });
-    });
-
-    // CALL TIMER
-    function startCallTimer() {
-        callStartTime = Date.now();
-        setInterval(() => {
-            const elapsedSeconds = Math.floor((Date.now() - callStartTime) / 1000);
-            const mins = String(Math.floor(elapsedSeconds / 60)).padStart(2, '0');
-            const secs = String(elapsedSeconds % 60).padStart(2, '0');
-            callTimer.textContent = `${mins}:${secs}`;
-        }, 1000);
-    }
-
-    // UTILITY FUNCTIONS
-    function updateControlButtonState(btn, enabled, activeIcon, inactiveIcon) {
-        btn.classList.toggle('off', !enabled);
-        const icon = btn.querySelector('i');
-        if (icon) icon.className = `fa-solid ${enabled ? activeIcon : inactiveIcon}`;
-    }
-
-    function showToast(message, type = 'info') {
-        const toast = document.createElement('div');
-        toast.className = 'toast';
-        toast.innerHTML = `
-            <i class="fa-solid ${type === 'success' ? 'fa-circle-check' : 'fa-circle-info'}"></i>
-            <span>${message}</span>
-        `;
-        toastContainer.appendChild(toast);
-        setTimeout(() => toast.remove(), 4000);
-    }
-
-    function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+            const localCard = $('local-card');
+            if (localCard) localCard.querySelector('video').srcObject = screenStream;
+            screenSharing = true;
+            $('btn-screen').classList.add('on');
+            track.onended = stopScreen;
+        } catch { /* cancelled */ }
+    } else {
+        stopScreen();
     }
 });
+
+function stopScreen() {
+    screenStream?.getTracks().forEach(t => t.stop());
+    screenStream = null;
+    const camTrack = localStream?.getVideoTracks()[0];
+    Object.values(remotePeers).forEach(p => {
+        if (p.call && p.call.peerConnection && camTrack) {
+            const sender = p.call.peerConnection.getSenders().find(s => s.track?.kind === 'video');
+            if (sender) sender.replaceTrack(camTrack);
+        }
+    });
+    const localCard = $('local-card');
+    if (localCard) localCard.querySelector('video').srcObject = localStream;
+    screenSharing = false;
+    $('btn-screen').classList.remove('on');
+}
+
+$('btn-hand').addEventListener('click', () => {
+    handUp = !handUp;
+    const btn = $('btn-hand');
+    btn.classList.toggle('on', handUp);
+    const localCard = $('local-card');
+    if (localCard) toggleHandBadge('local', handUp);
+    broadcast({ type: 'status', action: 'hand', value: handUp });
+    updatePeopleList();
+});
+
+$('btn-chat').addEventListener('click', () => {
+    toggleSidebar('chat-panel');
+    unread = 0; chatBadge.textContent = 0; chatBadge.classList.add('hidden');
+});
+
+$('btn-people').addEventListener('click', () => {
+    toggleSidebar('people-panel');
+});
+
+$('btn-close-sidebar').addEventListener('click', () => {
+    sidebar.classList.add('hidden');
+});
+
+$('btn-leave').addEventListener('click', () => {
+    if (confirm('Leave the call?')) {
+        clearInterval(pollTimer);
+        peer?.destroy();
+        localStream?.getTracks().forEach(t => t.stop());
+        location.reload();
+    }
+});
+
+$('btn-invite').addEventListener('click', () => {
+    const url = `${location.origin}${location.pathname}?room=${encodeURIComponent(inpRoom.value.trim() || 'common-lounge')}`;
+    navigator.clipboard.writeText(url).then(() => toast('Invite link copied!', 'success'));
+});
+
+// ── Sidebar tabs ───────────────────────────────────────────────────
+document.querySelectorAll('.stab').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const panelId = btn.dataset.panel;
+        document.querySelectorAll('.stab').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        document.querySelectorAll('.panel').forEach(p => {
+            p.classList.toggle('hidden', p.id !== panelId);
+            p.classList.toggle('active', p.id === panelId);
+        });
+    });
+});
+
+function toggleSidebar(panelId) {
+    const isHidden = sidebar.classList.contains('hidden');
+    sidebar.classList.toggle('hidden', !isHidden);
+    if (isHidden && panelId) {
+        document.querySelectorAll('.stab').forEach(b => b.classList.toggle('active', b.dataset.panel === panelId));
+        document.querySelectorAll('.panel').forEach(p => {
+            p.classList.toggle('hidden', p.id !== panelId);
+            p.classList.toggle('active', p.id === panelId);
+        });
+    }
+}
+
+// ── Chat ───────────────────────────────────────────────────────────
+chatForm.addEventListener('submit', e => {
+    e.preventDefault();
+    const text = chatInp.value.trim();
+    if (!text) return;
+    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    appendBubble(myName, myColor, text, time, true, 'me');
+    broadcast({ type: 'chat', name: myName, color: myColor, text, time });
+    chatInp.value = '';
+});
+
+function appendBubble(name, color, text, time, isSelf, _fromId) {
+    const div = document.createElement('div');
+    div.className = 'bubble ' + (isSelf ? 'me' : 'them');
+    div.innerHTML = `
+        <div class="meta">
+            <span style="color:${color}">${name}</span>
+            <span>${time || ''}</span>
+        </div>
+        <div class="text">${esc(text)}</div>`;
+    chatLog.appendChild(div);
+    chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+// ── Timer ──────────────────────────────────────────────────────────
+function startTimer() {
+    timerStart = Date.now();
+    setInterval(() => {
+        const s = Math.floor((Date.now() - timerStart) / 1000);
+        callTimerEl.textContent = `${pad(Math.floor(s / 60))}:${pad(s % 60)}`;
+    }, 1000);
+}
+const pad = n => String(n).padStart(2, '0');
+
+// ── Helpers ────────────────────────────────────────────────────────
+function toast(msg, type = 'info') {
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.innerHTML = `<i class="fa-solid ${type === 'success' ? 'fa-circle-check' : type === 'warn' ? 'fa-triangle-exclamation' : 'fa-circle-info'}"></i> ${msg}`;
+    toastStack.appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+}
+
+function esc(t) {
+    const d = document.createElement('div');
+    d.textContent = t;
+    return d.innerHTML;
+}

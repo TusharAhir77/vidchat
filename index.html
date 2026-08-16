@@ -3,217 +3,188 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OmniCall - Group Video Calling</title>
-    <!-- Google Fonts -->
+    <title>OmniCall – Group Video Calling</title>
+    <meta name="description" content="OmniCall – Free open group video calling. Join the lounge, invite friends, no sign up needed.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
-    <!-- FontAwesome for crisp icons -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    <!-- App CSS -->
     <link rel="stylesheet" href="static/css/style.css">
-    <!-- Socket.IO & PeerJS Clients -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
-    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
-<body class="dark-theme">
+<body>
 
-    <!-- LOGIN / LOBBY SCREEN -->
-    <div id="login-screen" class="screen-container active">
-        <div class="login-card glass-panel">
-            <div class="brand-header">
-                <div class="brand-logo">
-                    <i class="fa-solid fa-video"></i>
-                </div>
-                <h2>OmniCall Lounge</h2>
-                <p>Join the open group video call or start your own room</p>
-            </div>
-
-            <!-- Pre-join camera preview -->
-            <div class="preview-box">
-                <video id="login-video-preview" autoplay muted playsinline></video>
-                <div class="preview-placeholder" id="preview-placeholder">
-                    <i class="fa-solid fa-user"></i>
-                </div>
-                <div class="preview-overlay-controls">
-                    <button id="preview-toggle-audio" class="icon-btn circle" title="Toggle Mic">
-                        <i class="fa-solid fa-microphone"></i>
-                    </button>
-                    <button id="preview-toggle-video" class="icon-btn circle" title="Toggle Video">
-                        <i class="fa-solid fa-video"></i>
-                    </button>
-                </div>
-            </div>
-
-            <form id="join-form">
-                <div class="form-group">
-                    <label for="username">Your Name</label>
-                    <div class="input-wrapper">
-                        <i class="fa-solid fa-user-circle input-icon"></i>
-                        <input type="text" id="username" placeholder="Enter your name" required autocomplete="off">
-                    </div>
-                </div>
-
-                <div class="form-group">
-                    <label for="room-name">Call Room</label>
-                    <div class="input-wrapper">
-                        <i class="fa-solid fa-users input-icon"></i>
-                        <input type="text" id="room-name" placeholder="Common Lounge" value="Common Lounge" autocomplete="off">
-                    </div>
-                    <small class="help-text">Leave default to join the open common group call.</small>
-                </div>
-
-                <div class="form-group">
-                    <label>Choose Avatar Color</label>
-                    <div class="color-picker-grid">
-                        <button type="button" class="color-dot active" data-color="#3b82f6" style="background: #3b82f6;"></button>
-                        <button type="button" class="color-dot" data-color="#8b5cf6" style="background: #8b5cf6;"></button>
-                        <button type="button" class="color-dot" data-color="#ec4899" style="background: #ec4899;"></button>
-                        <button type="button" class="color-dot" data-color="#10b981" style="background: #10b981;"></button>
-                        <button type="button" class="color-dot" data-color="#f59e0b" style="background: #f59e0b;"></button>
-                        <button type="button" class="color-dot" data-color="#06b6d4" style="background: #06b6d4;"></button>
-                    </div>
-                </div>
-
-                <button type="submit" id="btn-join-call" class="btn btn-primary btn-block">
-                    <i class="fa-solid fa-door-open"></i> Join Video Call
-                </button>
-            </form>
-        </div>
+<!-- ========================= LOGIN SCREEN ========================= -->
+<div id="login-screen" class="screen active">
+    <div class="login-bg-blobs">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
     </div>
-
-    <!-- MAIN CALL SCREEN -->
-    <div id="call-screen" class="screen-container hidden">
-        <!-- Top App Bar -->
-        <header class="app-header">
-            <div class="header-left">
-                <div class="room-badge">
-                    <span class="live-dot"></span>
-                    <i class="fa-solid fa-users"></i>
-                    <span id="display-room-name">Common Lounge</span>
-                </div>
-                <button id="btn-copy-link" class="btn-ghost" title="Copy Invitation Link">
-                    <i class="fa-solid fa-link"></i> Invite
-                </button>
+    <div class="login-card glass">
+        <div class="brand">
+            <div class="brand-icon"><i class="fa-solid fa-video"></i></div>
+            <div class="brand-text">
+                <h1>OmniCall</h1>
+                <p>Open group video calling — no sign-up needed</p>
             </div>
-
-            <div class="header-center">
-                <div class="call-timer" id="call-timer">00:00</div>
-            </div>
-
-            <div class="header-right">
-                <button id="btn-toggle-grid" class="btn-icon-text" title="Switch View">
-                    <i class="fa-solid fa-table-cells-large"></i> Grid
-                </button>
-                <div class="participant-count-pill" id="participant-count-badge">
-                    <i class="fa-solid fa-user"></i> 1
-                </div>
-            </div>
-        </header>
-
-        <!-- Main Video Area & Sidebar Container -->
-        <div class="call-workspace">
-            <!-- Video Grid -->
-            <main id="video-grid-container" class="video-grid-container layout-grid">
-                <div id="video-grid" class="video-grid">
-                    <!-- Local user card will be appended here dynamically -->
-                    <!-- Peer cards will be appended dynamically -->
-                </div>
-            </main>
-
-            <!-- Collapsible Sidebar -->
-            <aside id="call-sidebar" class="call-sidebar hidden">
-                <div class="sidebar-header">
-                    <div class="sidebar-tabs">
-                        <button id="tab-chat" class="tab-btn active" data-target="panel-chat">
-                            <i class="fa-solid fa-comments"></i> Chat
-                            <span id="unread-chat-badge" class="badge hidden">0</span>
-                        </button>
-                        <button id="tab-people" class="tab-btn" data-target="panel-people">
-                            <i class="fa-solid fa-user-group"></i> People (<span id="sidebar-peer-count">1</span>)
-                        </button>
-                    </div>
-                    <button id="btn-close-sidebar" class="btn-icon-only">
-                        <i class="fa-solid fa-xmark"></i>
-                    </button>
-                </div>
-
-                <!-- Chat Panel -->
-                <div id="panel-chat" class="sidebar-panel active">
-                    <div id="chat-messages" class="chat-messages">
-                        <div class="system-message">
-                            Welcome to the group video call! Send a message to everyone in the room.
-                        </div>
-                    </div>
-                    <form id="chat-form" class="chat-form">
-                        <input type="text" id="chat-input" placeholder="Type a message..." autocomplete="off">
-                        <button type="submit" class="btn-send">
-                            <i class="fa-solid fa-paper-plane"></i>
-                        </button>
-                    </form>
-                </div>
-
-                <!-- People / Participants Panel -->
-                <div id="panel-people" class="sidebar-panel">
-                    <div id="participants-list" class="participants-list">
-                        <!-- Dynamic participant list items -->
-                    </div>
-                </div>
-            </aside>
         </div>
 
-        <!-- Bottom Call Toolbar -->
-        <footer class="call-controls-bar">
-            <div class="controls-wrapper">
-                <!-- Audio Mute -->
-                <button id="btn-audio" class="control-btn" title="Mute/Unmute Mic">
+        <div class="preview-wrap">
+            <video id="preview-video" autoplay muted playsinline></video>
+            <div id="preview-avatar" class="preview-avatar hidden">
+                <i class="fa-solid fa-user"></i>
+            </div>
+            <div class="preview-controls">
+                <button id="btn-pre-mic" class="pre-btn" title="Toggle mic">
                     <i class="fa-solid fa-microphone"></i>
-                    <span>Mic</span>
                 </button>
-
-                <!-- Camera Toggle -->
-                <button id="btn-video" class="control-btn" title="Turn Camera Off/On">
+                <button id="btn-pre-cam" class="pre-btn" title="Toggle camera">
                     <i class="fa-solid fa-video"></i>
-                    <span>Camera</span>
-                </button>
-
-                <!-- Screen Share -->
-                <button id="btn-screen" class="control-btn" title="Share Screen">
-                    <i class="fa-solid fa-desktop"></i>
-                    <span>Share</span>
-                </button>
-
-                <!-- Hand Raise -->
-                <button id="btn-hand" class="control-btn" title="Raise Hand">
-                    <i class="fa-solid fa-hand"></i>
-                    <span>Raise Hand</span>
-                </button>
-
-                <!-- Chat Drawer Toggle -->
-                <button id="btn-chat-toggle" class="control-btn" title="Open Chat">
-                    <i class="fa-solid fa-message"></i>
-                    <span>Chat</span>
-                </button>
-
-                <!-- Participants Drawer Toggle -->
-                <button id="btn-people-toggle" class="control-btn" title="Participants">
-                    <i class="fa-solid fa-user-group"></i>
-                    <span>People</span>
-                </button>
-
-                <!-- Leave Call -->
-                <button id="btn-leave" class="control-btn btn-danger" title="Leave Call">
-                    <i class="fa-solid fa-phone-slash"></i>
-                    <span>Leave</span>
                 </button>
             </div>
-        </footer>
+            <div id="preview-status" class="preview-status">
+                <span class="dot-pulse"></span> Camera preview
+            </div>
+        </div>
+
+        <form id="join-form">
+            <div class="field">
+                <label for="inp-name">Your display name</label>
+                <div class="field-inner">
+                    <i class="fa-solid fa-user"></i>
+                    <input id="inp-name" type="text" placeholder="e.g. Tushar" maxlength="30" autocomplete="off" required>
+                </div>
+            </div>
+            <div class="field">
+                <label for="inp-room">Room name</label>
+                <div class="field-inner">
+                    <i class="fa-solid fa-door-open"></i>
+                    <input id="inp-room" type="text" placeholder="common-lounge" value="common-lounge" autocomplete="off">
+                </div>
+                <span class="field-hint">Everyone with the same room name connects together</span>
+            </div>
+            <div class="field">
+                <label>Avatar color</label>
+                <div class="color-row">
+                    <button type="button" class="color-swatch active" data-color="#3b82f6" style="background:#3b82f6"></button>
+                    <button type="button" class="color-swatch" data-color="#8b5cf6" style="background:#8b5cf6"></button>
+                    <button type="button" class="color-swatch" data-color="#ec4899" style="background:#ec4899"></button>
+                    <button type="button" class="color-swatch" data-color="#10b981" style="background:#10b981"></button>
+                    <button type="button" class="color-swatch" data-color="#f59e0b" style="background:#f59e0b"></button>
+                    <button type="button" class="color-swatch" data-color="#06b6d4" style="background:#06b6d4"></button>
+                    <button type="button" class="color-swatch" data-color="#ef4444" style="background:#ef4444"></button>
+                </div>
+            </div>
+            <button id="btn-join" type="submit" class="btn-join">
+                <i class="fa-solid fa-arrow-right-to-bracket"></i>
+                Join Call
+            </button>
+        </form>
+    </div>
+</div>
+
+<!-- ========================= CALL SCREEN ========================= -->
+<div id="call-screen" class="screen hidden">
+
+    <!-- Header -->
+    <header class="call-header">
+        <div class="header-left">
+            <div class="room-pill">
+                <span class="live-indicator"></span>
+                <i class="fa-solid fa-users"></i>
+                <span id="room-label">common-lounge</span>
+            </div>
+            <button id="btn-invite" class="ghost-btn">
+                <i class="fa-solid fa-link"></i>
+                <span>Invite</span>
+            </button>
+        </div>
+        <div class="header-center">
+            <span id="call-timer" class="call-timer">00:00</span>
+        </div>
+        <div class="header-right">
+            <div id="peer-count-pill" class="peer-pill">
+                <i class="fa-solid fa-user"></i> 1
+            </div>
+        </div>
+    </header>
+
+    <!-- Workspace -->
+    <div class="workspace">
+        <!-- Video grid -->
+        <div id="grid-wrap" class="grid-wrap">
+            <div id="video-grid" class="video-grid" data-count="1"></div>
+        </div>
+
+        <!-- Sidebar -->
+        <aside id="sidebar" class="sidebar hidden">
+            <div class="sidebar-head">
+                <div class="sidebar-tabs">
+                    <button class="stab active" data-panel="chat-panel">
+                        <i class="fa-solid fa-comments"></i> Chat
+                        <span id="chat-badge" class="badge hidden">0</span>
+                    </button>
+                    <button class="stab" data-panel="people-panel">
+                        <i class="fa-solid fa-user-group"></i> People
+                    </button>
+                </div>
+                <button id="btn-close-sidebar" class="icon-only-btn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div id="chat-panel" class="panel active">
+                <div id="chat-log" class="chat-log">
+                    <div class="sys-msg">You're in the call. Say hi! 👋</div>
+                </div>
+                <form id="chat-form" class="chat-form">
+                    <input id="chat-inp" type="text" placeholder="Message everyone…" autocomplete="off">
+                    <button type="submit" class="send-btn"><i class="fa-solid fa-paper-plane"></i></button>
+                </form>
+            </div>
+            <div id="people-panel" class="panel hidden">
+                <ul id="people-list" class="people-list"></ul>
+            </div>
+        </aside>
     </div>
 
-    <!-- Toast Notification Container -->
-    <div id="toast-container" class="toast-container"></div>
+    <!-- Controls -->
+    <footer class="controls">
+        <div class="controls-inner">
+            <button id="btn-mic" class="ctrl-btn" title="Mute/Unmute">
+                <i class="fa-solid fa-microphone"></i>
+                <span>Mic</span>
+            </button>
+            <button id="btn-cam" class="ctrl-btn" title="Camera">
+                <i class="fa-solid fa-video"></i>
+                <span>Camera</span>
+            </button>
+            <button id="btn-screen" class="ctrl-btn" title="Share screen">
+                <i class="fa-solid fa-desktop"></i>
+                <span>Share</span>
+            </button>
+            <button id="btn-hand" class="ctrl-btn" title="Raise hand">
+                <i class="fa-solid fa-hand"></i>
+                <span>Hand</span>
+            </button>
+            <button id="btn-chat" class="ctrl-btn" title="Chat">
+                <i class="fa-solid fa-message"></i>
+                <span>Chat</span>
+            </button>
+            <button id="btn-people" class="ctrl-btn" title="People">
+                <i class="fa-solid fa-user-group"></i>
+                <span>People</span>
+            </button>
+            <button id="btn-leave" class="ctrl-btn danger-btn" title="Leave">
+                <i class="fa-solid fa-phone-slash"></i>
+                <span>Leave</span>
+            </button>
+        </div>
+    </footer>
+</div>
 
-    <!-- App JS -->
-    <script src="static/js/main.js"></script>
+<!-- Toast -->
+<div id="toasts" class="toast-stack"></div>
+
+<!-- PeerJS & App -->
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<script src="static/js/main.js"></script>
 </body>
 </html>
